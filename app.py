@@ -391,7 +391,6 @@ if "stake_confirmed" not in st.session_state:
 # ---------------- Sidebar ----------------
 st.sidebar.markdown("## ⚙️ Settings")
 
-
 pw = st.sidebar.text_input("Passcode to edit", type="password", placeholder="Enter passcode", key="real_pw")
 edit_mode = (pw.strip() == PASSCODE)
 st.sidebar.write(f"**Mode:** {'🟢 Edit' if edit_mode else '🔵 View'}")
@@ -427,7 +426,6 @@ if st.sidebar.button("📌 Make current version the base (overwrite seed.json)",
     save_seed_bundle()
     st.sidebar.success("Base updated (wrote current bets & transfers to seed.json).")
 
-
 # ---------------- Compute ----------------
 bets = compute_all(st.session_state.bets)
 
@@ -437,6 +435,125 @@ def scaled_dollars(series: pd.Series) -> pd.Series:
 
 # ---------------- UI ----------------
 tab_dash, tab_stats, tab_bets, tab_court = st.tabs(["🏆 Dashboard", "📈 Stats", "📋 Bets", "🍻 MyCourt"])
+
+# ---- helper to render Stats (confines all Stats content to the Stats tab) ----
+def render_stat_explorer(bets: pd.DataFrame):
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### Stat Explorer")
+
+    # 1) Pick filters
+    sports_all = ["All"] + sorted(list(bets["Sport"].dropna().unique()))
+    sport_filter = st.selectbox("Select Sport", sports_all, index=0)
+
+    # (Optional) Make the name list aware of the chosen sport
+    if sport_filter == "All":
+        names_all = ["All"] + sorted(list(bets["Name"].dropna().unique()))
+    else:
+        names_all = ["All"] + sorted(list(bets.loc[bets["Sport"] == sport_filter, "Name"].dropna().unique()))
+
+    col1, col2 = st.columns([2,1])
+    with col1:
+        who = st.selectbox("Filter by Name", names_all, index=0)
+    with col2:
+        topn = st.number_input("Top N extremes to show", min_value=1, max_value=100, value=10, step=1)
+
+    # 2) Apply BOTH filters to a single dataframe
+    filt = bets.copy()
+    if sport_filter != "All":
+        filt = filt[filt["Sport"] == sport_filter]
+    if who != "All":
+        filt = filt[filt["Name"] == who]
+
+    # 3) Performance by Sport
+    st.markdown("### 📊 Performance by Sport")
+    if not filt.empty:
+        sport_stats = []
+        for name in sorted(filt["Name"].dropna().unique()):
+            person_bets = filt[filt["Name"] == name]
+            wins = (person_bets["Result"].str.lower() == "win").sum()
+            losses = (person_bets["Result"].str.lower() == "loss").sum()
+            total = len(person_bets)
+            win_pct = (wins / total * 100) if total > 0 else 0.0
+            avg_odds = pd.to_numeric(person_bets["Odds"], errors="coerce").mean()
+            drinks = person_bets["Drink Change"].sum()
+            dollars = scaled_dollars(person_bets["Dollars"]).sum()
+            sport_stats.append({
+                "Name": name,
+                "Record": f"{wins}-{losses}",
+                "Win %": win_pct,
+                "Total Bets": total,
+                "Avg Odds": avg_odds,
+                "Drinks": drinks,
+                "Dollars": dollars
+            })
+        sport_df = pd.DataFrame(sport_stats).sort_values("Win %", ascending=False)
+        st.table(neon_style(
+            sport_df,
+            highlight_col="Win %",
+            fmt_map={
+                "Win %": "{:.1f}%",
+                "Total Bets": "{:.0f}",
+                "Avg Odds": "{:.0f}",
+                "Drinks": "{:.2f}",
+                "Dollars": "${:,.2f}"
+            }
+        ))
+    else:
+        st.info("No bets found for this filter.")
+
+    # 4) Worst / Best Beats
+    losers = filt[filt["Result"].str.lower() == "loss"].copy()
+    losers["_prob"] = losers["Odds"].map(implied_prob)
+    worst = losers.sort_values("_prob", ascending=True).head(topn)[["Name","Parlay #","Bet","Odds","Result","Sport"]]
+
+    winners = filt[filt["Result"].str.lower() == "win"].copy()
+    winners["_prob"] = winners["Odds"].map(implied_prob)
+    best = winners.sort_values("_prob", ascending=False).head(topn)[["Name","Parlay #","Bet","Odds","Result","Sport"]]
+
+    st.markdown("#### 🟥 Worst Beats")
+    wb = worst.copy()
+    if not wb.empty: wb["Odds"] = pd.to_numeric(wb["Odds"], errors="coerce")
+    st.table(neon_style(wb, fmt_map={"Odds": "{:.0f}"}))
+
+    st.markdown("#### 🟩 Best Beats")
+    bb = best.copy()
+    if not bb.empty: bb["Odds"] = pd.to_numeric(bb["Odds"], errors="coerce")
+    st.table(neon_style(bb, fmt_map={"Odds": "{:.0f}"}))
+
+    # 5) Filtered History
+    st.markdown("#### 📜 Filtered History")
+    hist = filt.copy().sort_values("Created", ascending=False)
+    if not hist.empty:
+        hist["When"] = hist["Created"].map(lambda t: datetime.fromtimestamp(t).strftime("%m/%d %I:%M %p"))
+        view_cols = [c for c in ["When","Name","Parlay #","Bet","Odds","Result","Sport"] if c in hist.columns]
+        if "Odds" in hist.columns:
+            hist["Odds"] = pd.to_numeric(hist["Odds"], errors="coerce")
+        st.table(neon_style(hist[view_cols], fmt_map={"Odds": "{:.0f}"}))
+    else:
+        st.info("No bets match this filter yet.")
+
+    # 6) Spotlight — Wins & Losses
+    st.markdown("### Spotlight — Wins & Losses")
+    fav_wins   = filt[(filt["Result"].str.lower()=="win")  & (pd.to_numeric(filt["Odds"], errors="coerce") < 0)].copy()
+    dog_wins   = filt[(filt["Result"].str.lower()=="win")  & (pd.to_numeric(filt["Odds"], errors="coerce") > 0)].copy()
+    fav_losses = filt[(filt["Result"].str.lower()=="loss") & (pd.to_numeric(filt["Odds"], errors="coerce") < 0)].copy()
+    dog_losses = filt[(filt["Result"].str.lower()=="loss") & (pd.to_numeric(filt["Odds"], errors="coerce") > 0)].copy()
+
+    for df_ in (fav_wins, dog_wins, fav_losses, dog_losses):
+        if not df_.empty:
+            df_["Odds"] = pd.to_numeric(df_["Odds"], errors="coerce")
+
+    c3, c4 = st.columns(2)
+    with c3:
+        st.markdown("#### ✅ Chalk **Wins** (favorite wins)")
+        st.table(neon_style(fav_wins.sort_values("Odds").head(topn)[["Name","Parlay #","Bet","Odds","Sport"]],
+                            fmt_map={"Odds": "{:.0f}"}))
+    with c4:
+        st.markdown("#### 🎲 Longshot **Misses** (largest +odds losses)")
+        st.table(neon_style(dog_losses.sort_values("Odds", ascending=False).head(topn)[["Name","Parlay #","Bet","Odds","Sport"]],
+                            fmt_map={"Odds": "{:.0f}"}))
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # ----- Dashboard -----
 with tab_dash:
@@ -493,123 +610,18 @@ with tab_dash:
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ----- Stats -----
-st.markdown('<div class="card">', unsafe_allow_html=True)
-st.markdown("### Stat Explorer")
+with tab_stats:
+    render_stat_explorer(bets)
 
-# 1) Pick filters
-sports_all = ["All"] + sorted(list(bets["Sport"].dropna().unique()))
-sport_filter = st.selectbox("Select Sport", sports_all, index=0)
-
-# (Optional) Make the name list aware of the chosen sport
-if sport_filter == "All":
-    names_all = ["All"] + sorted(list(bets["Name"].dropna().unique()))
-else:
-    names_all = ["All"] + sorted(list(bets.loc[bets["Sport"] == sport_filter, "Name"].dropna().unique()))
-
-col1, col2 = st.columns([2,1])
-with col1:
-    who = st.selectbox("Filter by Name", names_all, index=0)
-with col2:
-    topn = st.number_input("Top N extremes to show", min_value=1, max_value=100, value=10, step=1)
-
-# 2) Apply BOTH filters to a single dataframe
-filt = bets.copy()
-if sport_filter != "All":
-    filt = filt[filt["Sport"] == sport_filter]
-if who != "All":
-    filt = filt[filt["Name"] == who]
-
-# 3) Performance by Sport (now uses the same filt)
-st.markdown("### 📊 Performance by Sport")
-if not filt.empty:
-    sport_stats = []
-    for name in sorted(filt["Name"].dropna().unique()):
-        person_bets = filt[filt["Name"] == name]
-        wins = (person_bets["Result"].str.lower() == "win").sum()
-        losses = (person_bets["Result"].str.lower() == "loss").sum()
-        total = len(person_bets)
-        win_pct = (wins / total * 100) if total > 0 else 0.0
-        avg_odds = pd.to_numeric(person_bets["Odds"], errors="coerce").mean()
-        drinks = person_bets["Drink Change"].sum()
-        dollars = scaled_dollars(person_bets["Dollars"]).sum()
-        sport_stats.append({
-            "Name": name,
-            "Record": f"{wins}-{losses}",
-            "Win %": win_pct,
-            "Total Bets": total,
-            "Avg Odds": avg_odds,
-            "Drinks": drinks,
-            "Dollars": dollars
-        })
-    sport_df = pd.DataFrame(sport_stats).sort_values("Win %", ascending=False)
-    st.table(neon_style(
-        sport_df,
-        highlight_col="Win %",
-        fmt_map={
-            "Win %": "{:.1f}%",
-            "Total Bets": "{:.0f}",
-            "Avg Odds": "{:.0f}",
-            "Drinks": "{:.2f}",
-            "Dollars": "${:,.2f}"
-        }
-    ))
-else:
-    st.info("No bets found for this filter.")
-
-# 4) Worst / Best Beats (now use filt)
-losers = filt[filt["Result"].str.lower() == "loss"].copy()
-losers["_prob"] = losers["Odds"].map(implied_prob)
-worst = losers.sort_values("_prob", ascending=False).head(topn)[["Name","Parlay #","Bet","Odds","Result","Sport"]]
-
-winners = filt[filt["Result"].str.lower() == "win"].copy()
-winners["_prob"] = winners["Odds"].map(implied_prob)
-best = winners.sort_values("_prob", ascending=True).head(topn)[["Name","Parlay #","Bet","Odds","Result","Sport"]]
-
-st.markdown("#### 🟥 Worst Beats")
-wb = worst.copy()
-if not wb.empty: wb["Odds"] = pd.to_numeric(wb["Odds"], errors="coerce")
-st.table(neon_style(wb, fmt_map={"Odds": "{:.0f}"}))
-
-st.markdown("#### 🟩 Best Beats")
-bb = best.copy()
-if not bb.empty: bb["Odds"] = pd.to_numeric(bb["Odds"], errors="coerce")
-st.table(neon_style(bb, fmt_map={"Odds": "{:.0f}"}))
-
-# 5) Filtered History (now uses filt)
-st.markdown("#### 📜 Filtered History")
-hist = filt.copy().sort_values("Created", ascending=False)
-if not hist.empty:
-    hist["When"] = hist["Created"].map(lambda t: datetime.fromtimestamp(t).strftime("%m/%d %I:%M %p"))
-    view_cols = [c for c in ["When","Name","Parlay #","Bet","Odds","Result","Sport"] if c in hist.columns]
-    if "Odds" in hist.columns:
-        hist["Odds"] = pd.to_numeric(hist["Odds"], errors="coerce")
-    st.table(neon_style(hist[view_cols], fmt_map={"Odds": "{:.0f}"}))
-else:
-    st.info("No bets match this filter yet.")
-
-# 6) Spotlight — Wins & Losses (now uses filt)
-st.markdown("### Spotlight — Wins & Losses")
-fav_wins   = filt[(filt["Result"].str.lower()=="win")  & (pd.to_numeric(filt["Odds"], errors="coerce") < 0)].copy()
-dog_wins   = filt[(filt["Result"].str.lower()=="win")  & (pd.to_numeric(filt["Odds"], errors="coerce") > 0)].copy()
-fav_losses = filt[(filt["Result"].str.lower()=="loss") & (pd.to_numeric(filt["Odds"], errors="coerce") < 0)].copy()
-dog_losses = filt[(filt["Result"].str.lower()=="loss") & (pd.to_numeric(filt["Odds"], errors="coerce") > 0)].copy()
-
-for df_ in (fav_wins, dog_wins, fav_losses, dog_losses):
-    if not df_.empty:
-        df_["Odds"] = pd.to_numeric(df_["Odds"], errors="coerce")
-
-c3, c4 = st.columns(2)
-with c3:
-    st.markdown("#### ✅ Chalk **Wins** (favorite wins)")
-    tbl = fav_wins.sort_values("Odds").head(topn)[["Name","Parlay #","Bet","Odds","Sport"]]
-    st.table(neon_style(tbl, fmt_map={"Odds": "{:.0f}"}))
-with c4:
-    st.markdown("#### 🎲 Longshot **Misses** (largest +odds losses)")
-    tbl = dog_losses.sort_values("Odds", ascending=False).head(topn)[["Name","Parlay #","Bet","Odds","Sport"]]
-    st.table(neon_style(tbl, fmt_map={"Odds": "{:.0f}"}))
-
-st.markdown("</div>", unsafe_allow_html=True)
-
+    # ----- Debug / computed (moved inside Stats tab so it doesn't show everywhere) -----
+    with st.expander("🔎 Computed (read-only)"):
+        debug = bets[["Name","Parlay #","Bet","Odds","Result","Sport","Takeover","Dagger","Drink Change","Dollars"]].copy()
+        debug["Dollars"] = scaled_dollars(debug["Dollars"])
+        st.table(neon_style(debug, fmt_map={
+            "Odds":         "{:.0f}",
+            "Drink Change": "{:.5f}",
+            "Dollars":      "${:,.2f}",
+        }))
 
 # ----- Bets -----
 with tab_bets:
@@ -700,13 +712,3 @@ with tab_court:
         ledger["When"] = ledger["Created"].map(lambda t: datetime.fromtimestamp(t).strftime("%m/%d %I:%M %p"))
         st.table(neon_style(ledger[["When","From","To","Amount"]], fmt_map={"Amount": "{:.2f}"}))
     st.markdown("</div>", unsafe_allow_html=True)
-
-# ----- Debug / computed -----
-with st.expander("🔎 Computed (read-only)"):
-    debug = bets[["Name","Parlay #","Bet","Odds","Result","Sport","Takeover","Dagger","Drink Change","Dollars"]].copy()
-    debug["Dollars"] = scaled_dollars(debug["Dollars"])
-    st.table(neon_style(debug, fmt_map={
-        "Odds":         "{:.0f}",
-        "Drink Change": "{:.5f}",
-        "Dollars":      "${:,.2f}",
-    }))
