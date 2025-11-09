@@ -97,55 +97,65 @@ div[data-baseweb="select"] > div,
 """
 st.markdown(NEON_CSS, unsafe_allow_html=True)
 
+# --------- Mobile mode toggle + body class hook ---------
+MOBILE = st.toggle("📱 Mobile mode", value=True, help="Optimizes layout for phones")
+st.markdown(
+    f"<script>document.body.classList.toggle('mobile-mode', {str(MOBILE).lower()});</script>",
+    unsafe_allow_html=True
+)
+
+# --------- Mobile-focused CSS (cards, compact tables, controls) ---------
 MOBILE_CSS = """
 <style>
-/* ---------- Global mobile tweaks ---------- */
-@media (max-width: 700px) {
-  html, body, [data-testid="stAppViewContainer"] {
-    font-size: 15px !important;
-  }
+:root{ --font-sm:14px; --font-md:15px; --font-lg:18px; }
 
-  /* Stack metrics one per row, auto height */
-  .metric-row{
-    grid-template-columns: 1fr !important;
-    gap: 12px !important;
-  }
-  .metric { height: auto !important; padding: 12px !important; }
-
-  /* Tabs: allow wrap + tighter spacing */
-  .stTabs [role="tablist"] { flex-wrap: wrap !important; gap: 8px !important; }
-  .stTabs [role="tab"] { padding: 8px 12px !important; font-size: 0.95rem !important; }
-
-  /* Buttons full-width + bigger tap targets */
-  .stButton>button, .stDownloadButton>button {
-    width: 100% !important; padding: .8rem 1rem !important; font-size: 1rem !important;
-  }
-
-  /* Preset stake buttons stack */
-  .stake-buttons { display: grid !important; grid-template-columns: 1fr !important; gap: 8px !important; }
-
-  /* Inputs: comfortable tap size */
-  [data-baseweb="select"] > div, .stNumberInput input,
-  .stTextInput>div>div>input {
-    min-height: 44px !important; font-size: 1rem !important;
-  }
-
-  /* Tables: enable horizontal scroll; sticky headers */
-  div[data-testid="stDataFrame"] div[role="table"]{
-    overflow-x: auto !important; display: block !important;
-  }
-  div[data-testid="stDataFrame"] thead th {
-    position: sticky; top: 0; z-index: 2;
-  }
-
-  /* Cards: slightly tighter */
-  .card { padding: 12px !important; border-radius: 14px !important; }
+/* Text size */
+body.mobile-mode, @media (max-width: 700px){
+  html, body, [data-testid="stAppViewContainer"] { font-size: var(--font-md) !important; }
 }
 
-/* Slightly reduce table cell padding overall (helps on mobile too) */
-div[data-testid="stDataFrame"] td, div[data-testid="stDataFrame"] th {
-  padding: 8px 10px !important;
+/* Metrics grid responsive */
+.metric-row{ display:grid; gap:14px; align-items:stretch; grid-template-columns: repeat(5,1fr); }
+@media (max-width:1100px){ .metric-row{ grid-template-columns: repeat(3,1fr); } }
+@media (max-width:700px){ .metric-row{ grid-template-columns: 1fr 1fr; } }
+body.mobile-mode .metric-row{ grid-template-columns: 1fr 1fr; gap:10px; }
+@media (max-width:420px){ .metric-row{ grid-template-columns: 1fr; } }
+.metric{ height:auto; padding:10px 12px !important; }
+
+/* Stake controls on mobile: grid */
+body.mobile-mode .stake-buttons{ display:grid !important; grid-template-columns: repeat(2,1fr) !important; gap:8px !important; }
+body.mobile-mode .stButton>button{ width:100% !important; padding:.7rem 1rem !important; font-size:1rem !important; }
+
+/* Tabs wrap */
+.stTabs [role="tablist"] { gap:10px; flex-wrap:wrap; }
+.stTabs [role="tab"] { padding: 8px 12px !important; font-size:.98rem !important; }
+
+/* Tables that remain as tables: scroll + sticky header + tighter padding */
+@media (max-width: 700px), body.mobile-mode {
+  div[data-testid="stDataFrame"] div[role="table"]{ overflow-x:auto !important; display:block !important; }
+  div[data-testid="stDataFrame"] thead th { position: sticky; top: 0; z-index: 2; }
+  div[data-testid="stDataFrame"] td, div[data-testid="stDataFrame"] th { padding: 8px 10px !important; }
 }
+
+/* Card list look for mobile lists */
+.list{ display:grid; gap:10px; }
+.item{
+  background: var(--panel);
+  border: 1px solid var(--grid);
+  border-radius: 14px;
+  padding: 10px 12px;
+  box-shadow: 0 6px 18px rgba(0,0,0,.25);
+}
+.item .top{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.item .name{ font-weight: 800; }
+.item .pill{
+  display:inline-block; border:1px solid var(--grid); border-radius:999px; padding:2px 8px; font-size:.85rem;
+  background: linear-gradient(180deg,var(--panel),var(--panel-2));
+}
+.item .muted{ color: var(--muted); font-size:.86rem; }
+.item .bet{ margin-top:6px; line-height:1.25; }
+.item .row{ display:flex; gap:10px; flex-wrap:wrap; margin-top:8px;}
+.item .chip{ border:1px solid var(--grid); border-radius:10px; padding:3px 8px; font-size:.82rem; }
 </style>
 """
 st.markdown(MOBILE_CSS, unsafe_allow_html=True)
@@ -155,7 +165,6 @@ def neon_style(df, highlight_col: str | None = None,
                fmt_map: dict[str, str] | None = None,
                default_decimals: int | None = None):
     df = df.reset_index(drop=True)
-
     sty = (df.style
            .set_properties(**{
                "background-color":"#283329",
@@ -173,8 +182,6 @@ def neon_style(df, highlight_col: str | None = None,
            ])
            .hide(axis="index")
     )
-
-    # Only apply width tweaks if those columns exist (prevents KeyError on other tables)
     if "Name" in df.columns:
         sty = sty.set_properties(subset=pd.IndexSlice[:, ["Name"]],
                                  **{"min-width":"160px", "width":"160px"})
@@ -184,18 +191,15 @@ def neon_style(df, highlight_col: str | None = None,
     if "Active Streak" in df.columns:
         sty = sty.set_properties(subset=pd.IndexSlice[:, ["Active Streak"]],
                                  **{"max-width":"80px", "min-width":"80px", "width":"80px"})
-
     if highlight_col and highlight_col in df.columns and not df.empty:
         vmin = pd.to_numeric(df[highlight_col], errors="coerce").min()
         vmax = pd.to_numeric(df[highlight_col], errors="coerce").max()
         sty = sty.bar(subset=[highlight_col], color="#39ff1422", vmin=vmin, vmax=vmax)
-
     if fmt_map:
         sty = sty.format(fmt_map)
     elif default_decimals is not None:
         num_cols = df.select_dtypes(include="number").columns
         sty = sty.format({c: f"{{:.{default_decimals}f}}" for c in num_cols})
-
     return sty
 
 # ---------------- Helpers ----------------
@@ -269,22 +273,17 @@ def apply_takeover(df: pd.DataFrame) -> pd.DataFrame:
     out["Takeover"] = False
     out["Drink Change"] = 0.0
     discount = _parlay_all_miss_discounts(df)
-
     for _, g in out.groupby("Name", sort=False):
         streak = 0
         for idx, row in g.iterrows():
             takeover = streak >= 3
             out.at[idx,"Takeover"] = takeover
-
             val = base_drink_change(row["Odds"], row["Result"])
-
             if takeover and str(row["Result"]).lower() == "win":
                 val *= 2.0
             if str(row["Result"]).lower() == "loss":
                 val *= discount.get(idx, 1.0)
-
             out.at[idx,"Drink Change"] = val
-
             if str(row["Result"]).lower() == "win":
                 streak += 1
             elif str(row["Result"]).lower() == "loss":
@@ -305,7 +304,6 @@ def compute_all(bets_raw: pd.DataFrame):
     df = bets_raw.copy()
     df["Odds"] = df["Odds"].map(clean_odds)
     df["Result"] = df["Result"].fillna("").astype(str).str.title()
-
     df = apply_takeover(df)
     df["Dagger"] = compute_daggers(df)
     df["Dollars"] = [dollars_pnl_100(o, r) for o, r in zip(df["Odds"], df["Result"])]
@@ -444,7 +442,6 @@ if "stake_confirmed" not in st.session_state:
 # ---------------- Sidebar ----------------
 st.sidebar.markdown("## ⚙️ Settings")
 
-
 pw = st.sidebar.text_input("Passcode to edit", type="password", placeholder="Enter passcode", key="real_pw")
 edit_mode = (pw.strip() == PASSCODE)
 st.sidebar.write(f"**Mode:** {'🟢 Edit' if edit_mode else '🔵 View'}")
@@ -480,7 +477,6 @@ if st.sidebar.button("📌 Make current version the base (overwrite seed.json)",
     save_seed_bundle()
     st.sidebar.success("Base updated (wrote current bets & transfers to seed.json).")
 
-
 # ---------------- Compute ----------------
 bets = compute_all(st.session_state.bets)
 
@@ -488,46 +484,121 @@ def scaled_dollars(series: pd.Series) -> pd.Series:
     mult = float(st.session_state.stake_confirmed) / BASE_STAKE
     return series * mult
 
-# ------------- Mobile Mode -------------
-mobile = st.toggle("📱 Mobile mode (optimize layout for phones)", value=False,
-                   help="Stacks metrics, widens buttons, and adds in-page controls so you don't need the sidebar.")
-
-if mobile:
-    with st.expander("⚙️ Mobile Controls (Sidebar essentials)", expanded=True):
-        # Passcode (mirrors sidebar control for phones)
-        pw_mobile = st.text_input("Passcode to edit", type="password", placeholder="Enter passcode", key="mobile_pw")
-        edit_mode = (pw_mobile.strip() == PASSCODE)
-
-        colA, colB = st.columns(2)
-        with colA:
-            save_name_m = st.text_input("Save file name", value="fortsport_save.json", key="save_name_m")
-            st.download_button("💾 Download Save", data=dump_json_bundle(),
-                               file_name=save_name_m, mime="application/json", key="dl_m")
-        with colB:
-            up_m = st.file_uploader("Upload Save (.json)", type=["json"], key="up_m")
-            if up_m and edit_mode:
-                try:
-                    obj = json.loads(up_m.read().decode("utf-8"))
-                    bets_m, transfers_m = unpack_state(obj)
-                    st.session_state.bets = bets_m
-                    st.session_state.transfers = transfers_m
-                    st.success("Save loaded into working copy.")
-                except Exception as e:
-                    st.error(f"Could not read file: {e}")
-
-        # Stake presets (big, thumb-friendly)
-        st.write("#### Stake per bet ($)")
+# ---------------- Mobile UI helpers ----------------
+def stake_picker():
+    """Desktop = buttons; Mobile = segmented + custom."""
+    if not MOBILE:
+        st.markdown('<div class="stake-buttons">', unsafe_allow_html=True)
         c1, c2, c3, c4 = st.columns(4)
-        if c1.button("$5", key="m5"):   st.session_state.stake_confirmed = 5.0;  st.rerun()
-        if c2.button("$10", key="m10"): st.session_state.stake_confirmed = 10.0; st.rerun()
-        if c3.button("$25", key="m25"): st.session_state.stake_confirmed = 25.0; st.rerun()
-        if c4.button("$100", key="m100"): st.session_state.stake_confirmed = 100.0; st.rerun()
-        st.caption(f"Current stake: **${st.session_state.stake_confirmed:.2f}**")
+        if c1.button("$5"): st.session_state.stake_confirmed = 5.0;  st.rerun()
+        if c2.button("$10"): st.session_state.stake_confirmed = 10.0; st.rerun()
+        if c3.button("$25"): st.session_state.stake_confirmed = 25.0; st.rerun()
+        if c4.button("$100"):st.session_state.stake_confirmed = 100.0; st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        return
+    choice = st.radio("Pick stake", ["$5","$10","$25","$100","Custom"], horizontal=True, index=3)
+    if choice == "Custom":
+        val = st.number_input("Custom $", min_value=1.0, step=1.0, value=float(st.session_state.stake_confirmed))
+    else:
+        val = float(choice.replace("$",""))
+    st.button("Apply stake", on_click=lambda: st.session_state.update(stake_confirmed=val))
 
-        # Save base (seed.json)
-        if st.button("📌 Set current as base (seed.json)", disabled=not edit_mode, key="seed_m"):
-            save_seed_bundle()
-            st.success("Base updated (wrote current bets & transfers to seed.json).")
+def smart_table(df: pd.DataFrame, mobile_cols: list[str], fmt: dict[str,str] | None = None):
+    """Narrowed, scrollable table on mobile; full neon style on desktop."""
+    if df is None or df.empty:
+        st.info("Nothing to show yet.")
+        return
+    _df = df.copy()
+    def _truncate(s, n=40):
+        return s if not isinstance(s, str) or len(s) <= n else s[:n-1] + "…"
+    if MOBILE:
+        keep = [c for c in mobile_cols if c in _df.columns]
+        if keep:
+            _df = _df[keep]
+        for col in _df.select_dtypes(include="object").columns:
+            _df[col] = _df[col].map(lambda x: _truncate(str(x), 42))
+        st.dataframe(_df, use_container_width=True, height=360)
+    else:
+        if fmt:
+            st.table(neon_style(_df, fmt_map=fmt))
+        else:
+            st.table(neon_style(_df))
+
+def render_leaderboard_cards(summary: pd.DataFrame):
+    """Leaderboard as compact cards on phones; table on desktop."""
+    if summary.empty:
+        st.info("No data yet.")
+        return
+    if not MOBILE:
+        st.table(neon_style(summary, highlight_col="Drink Count", fmt_map={
+            "Drink Count":"{:.2f}","Cumulative Odds":"{:.2f}","Parlays Won":"{:,.0f}",
+            "Dollars Won":"${:,.2f}","Drinks Paid Out":"{:.2f}","Drinks Received":"{:.2f}"
+        }))
+        return
+    st.markdown('<div class="list">', unsafe_allow_html=True)
+    for _, r in summary.iterrows():
+        name  = r.get("Name","—")
+        rec   = r.get("Record","—")
+        drinks= r.get("Drink Count",0.0)
+        money = r.get("Dollars Won",0.0)
+        parl  = int(r.get("Parlays Won",0))
+        streak= r.get("Active Streak","")
+        co    = r.get("Cumulative Odds",float("nan"))
+        st.markdown(
+            f"""
+            <div class="item">
+              <div class="top">
+                <div class="name">{name}</div>
+                <div class="pill">{streak or ''}</div>
+              </div>
+              <div class="row">
+                <div class="chip">Record: <b>{rec}</b></div>
+                <div class="chip">Drinks: <b>{drinks:.2f}</b></div>
+                <div class="chip">$: <b>{money:,.2f}</b></div>
+                <div class="chip">Parlays: <b>{parl}</b></div>
+                <div class="chip">Avg Odds: <b>{'' if pd.isna(co) else int(co)}</b></div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+def render_bet_cards(df: pd.DataFrame, title: str):
+    """For Worst/Best/History lists -> pretty cards on phones."""
+    st.markdown(f"#### {title}")
+    if df is None or df.empty:
+        st.info("Nothing here.")
+        return
+    if not MOBILE:
+        st.table(neon_style(df, fmt_map={"Odds": "{:.0f}"}))
+        return
+    st.markdown('<div class="list">', unsafe_allow_html=True)
+    for _, r in df.iterrows():
+        name  = r.get("Name","—")
+        par   = r.get("Parlay #","—")
+        bet   = r.get("Bet","—")
+        odds  = r.get("Odds","")
+        sport = r.get("Sport","")
+        res   = r.get("Result","")
+        st.markdown(
+            f"""
+            <div class="item">
+              <div class="top">
+                <div class="name">{name}</div>
+                <div class="pill">{sport}</div>
+              </div>
+              <div class="bet muted">{bet}</div>
+              <div class="row">
+                <div class="chip">Parlay <b>#{par}</b></div>
+                <div class="chip">Odds <b>{'' if pd.isna(odds) else int(odds)}</b></div>
+                <div class="chip">Result <b>{res}</b></div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------- UI ----------------
 tab_dash, tab_stats, tab_bets, tab_court = st.tabs(["🏆 Dashboard", "📈 Stats", "📋 Bets", "🍻 MyCourt"])
@@ -548,23 +619,8 @@ with tab_dash:
         unsafe_allow_html=True
     )
 
-    # Stake PRESET buttons (only on Dashboard)
     st.write("#### Stake per bet ($)")
-    st.markdown('<div class="stake-buttons">', unsafe_allow_html=True)
-    b1, b2, b3, b4 = st.columns(4)
-    if b1.button("$5"):
-        st.session_state.stake_confirmed = 5.0
-        st.rerun()
-    if b2.button("$10"):
-        st.session_state.stake_confirmed = 10.0
-        st.rerun()
-    if b3.button("$25"):
-        st.session_state.stake_confirmed = 25.0
-        st.rerun()
-    if b4.button("$100"):
-        st.session_state.stake_confirmed = 100.0
-        st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
+    stake_picker()
     st.caption(f"All dollar amounts scale to the selected stake. Current stake: **${st.session_state.stake_confirmed:.2f}**.")
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -572,18 +628,7 @@ with tab_dash:
     summary = summarise(bets, st.session_state.transfers).copy()
     if "Dollars Won" in summary.columns:
         summary["Dollars Won"] = scaled_dollars(summary["Dollars Won"])
-    st.table(neon_style(
-        summary,
-        highlight_col="Drink Count",
-        fmt_map={
-            "Drink Count":     "{:.2f}",
-            "Cumulative Odds": "{:.2f}",
-            "Parlays Won":     "{:.0f}",
-            "Dollars Won":     "${:,.2f}",
-            "Drinks Paid Out": "{:.2f}",
-            "Drinks Received": "{:.2f}",
-        }
-    ))
+    render_leaderboard_cards(summary)
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ----- Stats -----
@@ -594,7 +639,7 @@ st.markdown("### Stat Explorer")
 sports_all = ["All"] + sorted(list(bets["Sport"].dropna().unique()))
 sport_filter = st.selectbox("Select Sport", sports_all, index=0)
 
-# (Optional) Make the name list aware of the chosen sport
+# Names aware of sport
 if sport_filter == "All":
     names_all = ["All"] + sorted(list(bets["Name"].dropna().unique()))
 else:
@@ -606,14 +651,14 @@ with col1:
 with col2:
     topn = st.number_input("Top N extremes to show", min_value=1, max_value=100, value=10, step=1)
 
-# 2) Apply BOTH filters to a single dataframe
+# 2) Apply BOTH filters
 filt = bets.copy()
 if sport_filter != "All":
     filt = filt[filt["Sport"] == sport_filter]
 if who != "All":
     filt = filt[filt["Name"] == who]
 
-# 3) Performance by Sport (now uses the same filt)
+# 3) Performance by Sport (uses filt)
 st.markdown("### 📊 Performance by Sport")
 if not filt.empty:
     sport_stats = []
@@ -636,21 +681,12 @@ if not filt.empty:
             "Dollars": dollars
         })
     sport_df = pd.DataFrame(sport_stats).sort_values("Win %", ascending=False)
-    st.table(neon_style(
-        sport_df,
-        highlight_col="Win %",
-        fmt_map={
-            "Win %": "{:.1f}%",
-            "Total Bets": "{:.0f}",
-            "Avg Odds": "{:.0f}",
-            "Drinks": "{:.2f}",
-            "Dollars": "${:,.2f}"
-        }
-    ))
+    fmt_perf = {"Win %":"{:.1f}%","Total Bets":"{:,.0f}","Avg Odds":"{:.0f}","Drinks":"{:.2f}","Dollars":"${:,.2f}"}
+    smart_table(sport_df, mobile_cols=["Name","Record","Win %","Dollars"], fmt=fmt_perf)
 else:
     st.info("No bets found for this filter.")
 
-# 4) Worst / Best Beats (now use filt)
+# 4) Worst / Best Beats (use filt)
 losers = filt[filt["Result"].str.lower() == "loss"].copy()
 losers["_prob"] = losers["Odds"].map(implied_prob)
 worst = losers.sort_values("_prob", ascending=False).head(topn)[["Name","Parlay #","Bet","Odds","Result","Sport"]]
@@ -659,29 +695,29 @@ winners = filt[filt["Result"].str.lower() == "win"].copy()
 winners["_prob"] = winners["Odds"].map(implied_prob)
 best = winners.sort_values("_prob", ascending=True).head(topn)[["Name","Parlay #","Bet","Odds","Result","Sport"]]
 
-st.markdown("#### 🟥 Worst Beats")
 wb = worst.copy()
 if not wb.empty: wb["Odds"] = pd.to_numeric(wb["Odds"], errors="coerce")
-st.table(neon_style(wb, fmt_map={"Odds": "{:.0f}"}))
+render_bet_cards(wb[["Name","Parlay #","Bet","Odds","Result","Sport"]], "🟥 Worst Beats")
 
-st.markdown("#### 🟩 Best Beats")
 bb = best.copy()
 if not bb.empty: bb["Odds"] = pd.to_numeric(bb["Odds"], errors="coerce")
-st.table(neon_style(bb, fmt_map={"Odds": "{:.0f}"}))
+render_bet_cards(bb[["Name","Parlay #","Bet","Odds","Result","Sport"]], "🟩 Best Beats")
 
-# 5) Filtered History (now uses filt)
+# 5) Filtered History (use filt)
 st.markdown("#### 📜 Filtered History")
 hist = filt.copy().sort_values("Created", ascending=False)
 if not hist.empty:
     hist["When"] = hist["Created"].map(lambda t: datetime.fromtimestamp(t).strftime("%m/%d %I:%M %p"))
-    view_cols = [c for c in ["When","Name","Parlay #","Bet","Odds","Result","Sport"] if c in hist.columns]
-    if "Odds" in hist.columns:
+    if MOBILE:
+        render_bet_cards(hist[["Name","Parlay #","Bet","Odds","Result","Sport"]], "📜 Filtered History")
+    else:
+        view_cols = [c for c in ["When","Name","Parlay #","Bet","Odds","Result","Sport"] if c in hist.columns]
         hist["Odds"] = pd.to_numeric(hist["Odds"], errors="coerce")
-    st.table(neon_style(hist[view_cols], fmt_map={"Odds": "{:.0f}"}))
+        st.table(neon_style(hist[view_cols], fmt_map={"Odds": "{:.0f}"}))
 else:
     st.info("No bets match this filter yet.")
 
-# 6) Spotlight — Wins & Losses (now uses filt)
+# 6) Spotlight — Wins & Losses (use filt)
 st.markdown("### Spotlight — Wins & Losses")
 fav_wins   = filt[(filt["Result"].str.lower()=="win")  & (pd.to_numeric(filt["Odds"], errors="coerce") < 0)].copy()
 dog_wins   = filt[(filt["Result"].str.lower()=="win")  & (pd.to_numeric(filt["Odds"], errors="coerce") > 0)].copy()
@@ -692,18 +728,23 @@ for df_ in (fav_wins, dog_wins, fav_losses, dog_losses):
     if not df_.empty:
         df_["Odds"] = pd.to_numeric(df_["Odds"], errors="coerce")
 
-c3, c4 = st.columns(2)
-with c3:
-    st.markdown("#### ✅ Chalk **Wins** (favorite wins)")
-    tbl = fav_wins.sort_values("Odds").head(topn)[["Name","Parlay #","Bet","Odds","Sport"]]
-    st.table(neon_style(tbl, fmt_map={"Odds": "{:.0f}"}))
-with c4:
-    st.markdown("#### 🎲 Longshot **Misses** (largest +odds losses)")
-    tbl = dog_losses.sort_values("Odds", ascending=False).head(topn)[["Name","Parlay #","Bet","Odds","Sport"]]
-    st.table(neon_style(tbl, fmt_map={"Odds": "{:.0f}"}))
+if MOBILE:
+    render_bet_cards(fav_wins.sort_values("Odds").head(topn)[["Name","Parlay #","Bet","Odds","Result","Sport"]],
+                     "✅ Chalk Wins")
+    render_bet_cards(dog_losses.sort_values("Odds", ascending=False).head(topn)[["Name","Parlay #","Bet","Odds","Result","Sport"]],
+                     "🎲 Longshot Misses")
+else:
+    c3, c4 = st.columns(2)
+    with c3:
+        st.markdown("#### ✅ Chalk **Wins** (favorite wins)")
+        tbl = fav_wins.sort_values("Odds").head(topn)[["Name","Parlay #","Bet","Odds","Sport"]]
+        st.table(neon_style(tbl, fmt_map={"Odds": "{:.0f}"}))
+    with c4:
+        st.markdown("#### 🎲 Longshot **Misses** (largest +odds losses)")
+        tbl = dog_losses.sort_values("Odds", ascending=False).head(topn)[["Name","Parlay #","Bet","Odds","Sport"]]
+        st.table(neon_style(tbl, fmt_map={"Odds": "{:.0f}"}))
 
 st.markdown("</div>", unsafe_allow_html=True)
-
 
 # ----- Bets -----
 with tab_bets:
@@ -792,15 +833,39 @@ with tab_court:
     else:
         ledger = st.session_state.transfers.copy().sort_values("Created", ascending=False)
         ledger["When"] = ledger["Created"].map(lambda t: datetime.fromtimestamp(t).strftime("%m/%d %I:%M %p"))
-        st.table(neon_style(ledger[["When","From","To","Amount"]], fmt_map={"Amount": "{:.2f}"}))
+        if MOBILE:
+            mini = ledger[["When","From","To","Amount"]]
+            st.markdown('<div class="list">', unsafe_allow_html=True)
+            for _, r in mini.iterrows():
+                st.markdown(f"""
+                    <div class="item">
+                      <div class="top"><div class="name">Transfer</div><div class="pill">{r['When']}</div></div>
+                      <div class="row">
+                        <div class="chip">From <b>{r['From']}</b></div>
+                        <div class="chip">To <b>{r['To']}</b></div>
+                        <div class="chip">Drinks <b>{r['Amount']:.2f}</b></div>
+                      </div>
+                    </div>
+                """, unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+        else:
+            st.table(neon_style(ledger[["When","From","To","Amount"]], fmt_map={"Amount": "{:.2f}"}))
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ----- Debug / computed -----
 with st.expander("🔎 Computed (read-only)"):
     debug = bets[["Name","Parlay #","Bet","Odds","Result","Sport","Takeover","Dagger","Drink Change","Dollars"]].copy()
     debug["Dollars"] = scaled_dollars(debug["Dollars"])
-    st.table(neon_style(debug, fmt_map={
-        "Odds":         "{:.0f}",
-        "Drink Change": "{:.5f}",
-        "Dollars":      "${:,.2f}",
-    }))
+    if MOBILE:
+        # Narrow debug for phones
+        slim = debug.copy()
+        slim["Odds"] = pd.to_numeric(slim["Odds"], errors="coerce")
+        smart_table(slim, mobile_cols=["Name","Parlay #","Bet","Odds","Result","Dollars"], fmt={
+            "Odds":"{:.0f}","Dollars":"${:,.2f}"
+        })
+    else:
+        st.table(neon_style(debug, fmt_map={
+            "Odds":         "{:.0f}",
+            "Drink Change": "{:.5f}",
+            "Dollars":      "${:,.2f}",
+        }))
