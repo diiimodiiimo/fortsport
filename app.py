@@ -1,7 +1,7 @@
 import os
 import math
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -13,6 +13,7 @@ PASSCODE = st.secrets.get("PASSCODE", "dimodimo")
 SEED_FILE = "seed.json"
 AUTOSAVE_FILE = "fortsport_autosave.json"
 BASE_STAKE = 100.0  # baseline logic assumes $100 per bet; we scale from this
+MILESTONES = [10, 25, 50, 100]
 
 # ---------------- Global theme (BLACK + NEON) ----------------
 NEON_CSS = """
@@ -258,11 +259,15 @@ def compute_all(bets_raw: pd.DataFrame):
     df["Dollars"] = [dollars_pnl_100(o, r) for o, r in zip(df["Odds"], df["Result"])]
     return df
 
+def _badge_str(wins: int) -> str:
+    got = [f"{m}W" for m in MILESTONES if wins >= m]
+    return ", ".join(got) if got else ""
+
 def summarise(df: pd.DataFrame, transfers: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         base = pd.DataFrame(columns=[
             "Name","Drink Count","Record","Active Streak","Cumulative Odds","Parlays Won","Dollars Won",
-            "Drinks Paid Out","Drinks Received"
+            "Drinks Paid Out","Drinks Received","Badges"
         ])
     else:
         tmp = df.copy()
@@ -296,9 +301,15 @@ def summarise(df: pd.DataFrame, transfers: pd.DataFrame) -> pd.DataFrame:
                       Dollars_Won=("Dollars","sum"),
                       Daggers=("Dagger","sum")))
         agg["Record"] = agg["Wins"].astype(str) + "-" + agg["Losses"].astype(str)
-        base = agg[["Name","Drink_Sum","Daggers","Record","Cumulative_Odds","Parlays_Won","Dollars_Won"]]
+        agg["Badges"] = agg["Wins"].apply(_badge_str)
+
+        base = agg[["Name","Drink_Sum","Daggers","Record","Cumulative_Odds","Parlays_Won","Dollars_Won","Badges"]]
         base = base.merge(streak_df, on="Name", how="left")
-        base = base.rename(columns={"Cumulative_Odds":"Cumulative Odds","Parlays_Won":"Parlays Won","Dollars_Won":"Dollars Won"})
+        base = base.rename(columns={
+            "Cumulative_Odds":"Cumulative Odds",
+            "Parlays_Won":"Parlays Won",
+            "Dollars_Won":"Dollars Won"
+        })
 
     # Transfers
     if transfers is None or transfers.empty:
@@ -320,8 +331,11 @@ def summarise(df: pd.DataFrame, transfers: pd.DataFrame) -> pd.DataFrame:
         - base["Drinks Received"]
     )
 
-    final = base[["Name","Drink Count","Record","Active Streak","Cumulative Odds","Parlays Won","Dollars Won",
-                  "Drinks Paid Out","Drinks Received"]].sort_values("Drink Count", ascending=False, kind="mergesort")
+    # Reorder so Badges is last
+    final = base[[
+        "Name","Drink Count","Record","Active Streak","Cumulative Odds","Parlays Won","Dollars Won",
+        "Drinks Paid Out","Drinks Received","Badges"
+    ]].sort_values("Drink Count", ascending=False, kind="mergesort")
     return final
 
 def total_parlays_won(df: pd.DataFrame) -> int:
@@ -330,27 +344,160 @@ def total_parlays_won(df: pd.DataFrame) -> int:
     all_win = df.groupby("Parlay #")["Result"].apply(lambda s: (s.str.lower()=="win").all())
     return int(((size >= 3) & all_win).sum())
 
+# ---------------- Milestones helpers ----------------
+def compute_win_milestones(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["Name","Milestone","When","Bet","Parlay #","Sport","Odds"])
+
+    wins = df[df["Result"].str.lower() == "win"].copy()
+    if wins.empty:
+        return pd.DataFrame(columns=["Name","Milestone","When","Bet","Parlay #","Sport","Odds"])
+
+    wins = wins.sort_values("Created")
+    records = []
+    for name, g in wins.groupby("Name"):
+        cum = 0
+        thresholds = sorted(MILESTONES)
+        idx = 0
+        for _, row in g.iterrows():
+            cum += 1
+            while idx < len(thresholds) and cum >= thresholds[idx]:
+                m = thresholds[idx]
+                when = datetime.fromtimestamp(row["Created"]).strftime("%m/%d/%Y %I:%M %p")
+                records.append({
+                    "Name": name,
+                    "Milestone": f"{m} Wins",
+                    "When": when,
+                    "Bet": row.get("Bet",""),
+                    "Parlay #": row.get("Parlay #",""),
+                    "Sport": row.get("Sport",""),
+                    "Odds": row.get("Odds", np.nan),
+                })
+                idx += 1
+            if idx >= len(thresholds):
+                break
+    if not records:
+        return pd.DataFrame(columns=["Name","Milestone","When","Bet","Parlay #","Sport","Odds"])
+    out = pd.DataFrame(records)
+    out["Odds"] = pd.to_numeric(out["Odds"], errors="coerce")
+    return out.sort_values("When", ascending=False)
+
+def compute_parlay_milestones(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["Parlay #","Player(s)","Legs","Hit On","Headline Bet","Avg Odds"])
+
+    tmp = df.copy()
+    tmp["win"] = (tmp["Result"].str.lower() == "win").astype(int)
+    size = tmp.groupby("Parlay #")["Result"].count()
+    all_win = tmp.groupby("Parlay #")["win"].apply(lambda s: (s == 1).all())
+    winning_ids = size[(size >= 3) & all_win].index
+
+    rows = []
+    for pid in winning_ids:
+        g = tmp[tmp["Parlay #"] == pid]
+        names = sorted(g["Name"].dropna().unique())
+        owner = ", ".join(names) if names else ""
+        created_ts = g["Created"].max() if "Created" in g.columns else None
+        when = datetime.fromtimestamp(created_ts).strftime("%m/%d/%Y %I:%M %p") if created_ts else ""
+        legs = len(g)
+        headline = g.iloc[0]["Bet"] if len(g) > 0 and "Bet" in g.columns else ""
+        avg_odds = pd.to_numeric(g["Odds"], errors="coerce").mean()
+        rows.append({
+            "Parlay #": pid,
+            "Player(s)": owner,
+            "Legs": legs,
+            "Hit On": when,
+            "Headline Bet": headline,
+            "Avg Odds": avg_odds
+        })
+    if not rows:
+        return pd.DataFrame(columns=["Parlay #","Player(s)","Legs","Hit On","Headline Bet","Avg Odds"])
+    out = pd.DataFrame(rows)
+    out["Avg Odds"] = pd.to_numeric(out["Avg Odds"], errors="coerce")
+    return out.sort_values("Hit On", ascending=False)
+
+def compute_weekly_pnl(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute weekly P&L across all bets.
+    Weeks run Sunday -> Saturday.
+    Uses scaled P&L (current stake).
+    """
+    if df.empty:
+        return pd.DataFrame(columns=["Week Start","Week End","Total P&L","Total Bets"])
+
+    tmp = df.copy()
+    tmp["P&L"] = scaled_dollars(tmp["Dollars"])
+
+    # Robust datetime conversion
+    tmp["dt"] = pd.to_datetime(tmp["Created"], unit="s", errors="coerce")
+    tmp = tmp.dropna(subset=["dt"])
+    if tmp.empty:
+        return pd.DataFrame(columns=["Week Start","Week End","Total P&L","Total Bets"])
+
+    tmp["Date"] = tmp["dt"].dt.date
+
+    # Week start = Sunday
+    def week_start_sunday(d):
+        # Monday=0,... Sunday=6; we want to subtract so that Sunday is start
+        return d - timedelta(days=((d.weekday() + 1) % 7))
+
+    tmp["Week Start"] = tmp["Date"].apply(week_start_sunday)
+    tmp["Week End"] = tmp["Week Start"].apply(lambda d: d + timedelta(days=6))
+
+    agg = (tmp.groupby("Week Start")
+             .agg(Total_PnL=("P&L", "sum"),
+                  Total_Bets=("P&L", "size"),
+                  Week_End=("Week End", "first"))
+             .reset_index())
+
+    agg = agg.rename(columns={
+        "Week Start": "Week Start",
+        "Week_End": "Week End",
+        "Total_PnL": "Total P&L",
+        "Total_Bets": "Total Bets"
+    })
+
+    # Ensure proper types
+    agg["Week Start"] = pd.to_datetime(agg["Week Start"]).dt.date
+    agg["Week End"] = pd.to_datetime(agg["Week End"]).dt.date
+
+    return agg.sort_values("Week Start", ascending=False)
+
 # ---------------- Bundle save/load ----------------
 def pack_state():
-    return {"bets": ensure_columns(st.session_state.bets.copy()),
-            "transfers": st.session_state.transfers.copy()}
+    return {
+        "bets": ensure_columns(st.session_state.bets.copy()),
+        "transfers": st.session_state.transfers.copy(),
+        "hof": st.session_state.get("hof_list", []),
+        "banned": st.session_state.get("banned_list", []),
+    }
 
 def unpack_state(obj):
+    # Always return (bets, transfers, hof, banned)
     if isinstance(obj, list):
-        return ensure_columns(pd.DataFrame(obj)), pd.DataFrame(columns=["From","To","Amount","Created"])
-    if isinstance(obj, dict) and "bets" in obj:
-        bets = ensure_columns(pd.DataFrame(obj["bets"]))
+        bets = ensure_columns(pd.DataFrame(obj))
+        transfers = pd.DataFrame(columns=["From","To","Amount","Created"])
+        return bets, transfers, [], []
+    if isinstance(obj, dict):
+        bets_src = obj.get("bets", obj)
+        bets = ensure_columns(pd.DataFrame(bets_src))
         transfers = pd.DataFrame(obj.get("transfers", []))
         if transfers.empty:
             transfers = pd.DataFrame(columns=["From","To","Amount","Created"])
-        return bets, transfers
-    return ensure_columns(pd.DataFrame(obj)), pd.DataFrame(columns=["From","To","Amount","Created"])
+        hof = obj.get("hof", [])
+        banned = obj.get("banned", [])
+        return bets, transfers, hof, banned
+    bets = ensure_columns(pd.DataFrame(obj))
+    transfers = pd.DataFrame(columns=["From","To","Amount","Created"])
+    return bets, transfers, [], []
 
 def dump_json_bundle() -> str:
     bundle = pack_state()
     return json.dumps({
         "bets": json.loads(bundle["bets"].to_json(orient="records")),
-        "transfers": json.loads(bundle["transfers"].to_json(orient="records"))
+        "transfers": json.loads(bundle["transfers"].to_json(orient="records")),
+        "hof": bundle.get("hof", []),
+        "banned": bundle.get("banned", []),
     })
 
 @st.cache_resource
@@ -361,15 +508,23 @@ def load_seed_bundle():
             return unpack_state(obj)
         except Exception:
             pass
-    return ensure_columns(example_df()), pd.DataFrame(columns=["From","To","Amount","Created"])
+    # default fallback
+    bets = ensure_columns(example_df())
+    transfers = pd.DataFrame(columns=["From","To","Amount","Created"])
+    return bets, transfers, [], []
 
 def save_seed_bundle():
-    bets = ensure_columns(st.session_state.bets.copy())
-    transfers = st.session_state.transfers.copy()
+    bundle = pack_state()
+    bets_df = ensure_columns(bundle["bets"].copy())
+    transfers_df = bundle["transfers"].copy()
+    hof = bundle.get("hof", [])
+    banned = bundle.get("banned", [])
     with open(SEED_FILE, "w", encoding="utf-8") as f:
         f.write(json.dumps({
-            "bets": json.loads(bets.to_json(orient="records")),
-            "transfers": json.loads(transfers.to_json(orient="records"))
+            "bets": json.loads(bets_df.to_json(orient="records")),
+            "transfers": json.loads(transfers_df.to_json(orient="records")),
+            "hof": hof,
+            "banned": banned,
         }))
 
 # ---------------- Session init ----------------
@@ -377,13 +532,21 @@ if "bets" not in st.session_state or "transfers" not in st.session_state:
     if os.path.exists(AUTOSAVE_FILE):
         try:
             obj = json.loads(open(AUTOSAVE_FILE, "r", encoding="utf-8").read())
-            bets, transfers = unpack_state(obj)
+            bets, transfers, hof, banned = unpack_state(obj)
         except Exception:
-            bets, transfers = load_seed_bundle()
+            bets, transfers, hof, banned = load_seed_bundle()
     else:
-        bets, transfers = load_seed_bundle()
+        bets, transfers, hof, banned = load_seed_bundle()
     st.session_state.bets = bets
     st.session_state.transfers = transfers
+    st.session_state.hof_list = hof
+    st.session_state.banned_list = banned
+
+# Ensure HoF/Banned exist even if set later
+if "hof_list" not in st.session_state:
+    st.session_state.hof_list = []
+if "banned_list" not in st.session_state:
+    st.session_state.banned_list = []
 
 if "stake_confirmed" not in st.session_state:
     st.session_state.stake_confirmed = BASE_STAKE  # default $100
@@ -406,9 +569,11 @@ up = st.sidebar.file_uploader("Upload Save (.json)", type=["json"])
 if up and edit_mode:
     try:
         obj = json.loads(up.read().decode("utf-8"))
-        bets, transfers = unpack_state(obj)
+        bets, transfers, hof, banned = unpack_state(obj)
         st.session_state.bets = bets
         st.session_state.transfers = transfers
+        st.session_state.hof_list = hof
+        st.session_state.banned_list = banned
         st.success("Save loaded into working copy.")
     except Exception as e:
         st.error(f"Could not read file: {e}")
@@ -424,7 +589,7 @@ st.sidebar.caption(f"Autosave path: `{AUTOSAVE_FILE}`")
 # Save current working copy as the new base (seed.json)
 if st.sidebar.button("📌 Make current version the base (overwrite seed.json)", disabled=not edit_mode):
     save_seed_bundle()
-    st.sidebar.success("Base updated (wrote current bets & transfers to seed.json).")
+    st.sidebar.success("Base updated (wrote current bets, transfers, HoF & Banned to seed.json).")
 
 # ---------------- Compute ----------------
 bets = compute_all(st.session_state.bets)
@@ -434,7 +599,18 @@ def scaled_dollars(series: pd.Series) -> pd.Series:
     return series * mult
 
 # ---------------- UI ----------------
-tab_dash, tab_stats, tab_bets, tab_court = st.tabs(["🏆 Dashboard", "📈 Stats", "📋 Bets", "🍻 MyCourt"])
+# NEW TAB ORDER:
+# Dashboard, Stats, MyCourt Milestones, HoF & Banned, Drink Transfers, Bets
+tab_dash, tab_stats, tab_miles, tab_hof, tab_court, tab_bets = st.tabs(
+    [
+        "🏆 Dashboard",
+        "📈 Stats",
+        "🏅 MyCourt Milestones",
+        "🏛️ HoF & 🚫 Banned",
+        "🍻 Drink Transfers",
+        "📋 Bets",
+    ]
+)
 
 # ---- helper to render Stats (confines all Stats content to the Stats tab) ----
 def render_stat_explorer(bets: pd.DataFrame):
@@ -504,18 +680,20 @@ def render_stat_explorer(bets: pd.DataFrame):
     # 4) Worst / Best Beats
     losers = filt[filt["Result"].str.lower() == "loss"].copy()
     losers["_prob"] = losers["Odds"].map(implied_prob)
-    worst = losers.sort_values("_prob", ascending=True).head(topn)[["Name","Parlay #","Bet","Odds","Result","Sport"]]
+    # WORST BEATS: highest implied probability losses (e.g. -200 losing)
+    worst = losers.sort_values("_prob", ascending=False).head(topn)[["Name","Parlay #","Bet","Odds","Result","Sport"]]
 
     winners = filt[filt["Result"].str.lower() == "win"].copy()
     winners["_prob"] = winners["Odds"].map(implied_prob)
-    best = winners.sort_values("_prob", ascending=False).head(topn)[["Name","Parlay #","Bet","Odds","Result","Sport"]]
+    # BEST BEATS: lowest implied probability wins (biggest upsets)
+    best = winners.sort_values("_prob", ascending=True).head(topn)[["Name","Parlay #","Bet","Odds","Result","Sport"]]
 
-    st.markdown("#### 🟥 Worst Beats")
+    st.markdown("#### 🟥 Worst Beats (highest-probability losses)")
     wb = worst.copy()
     if not wb.empty: wb["Odds"] = pd.to_numeric(wb["Odds"], errors="coerce")
     st.table(neon_style(wb, fmt_map={"Odds": "{:.0f}"}))
 
-    st.markdown("#### 🟩 Best Beats")
+    st.markdown("#### 🟩 Best Beats (biggest upset wins)")
     bb = best.copy()
     if not bb.empty: bb["Odds"] = pd.to_numeric(bb["Odds"], errors="coerce")
     st.table(neon_style(bb, fmt_map={"Odds": "{:.0f}"}))
@@ -546,12 +724,16 @@ def render_stat_explorer(bets: pd.DataFrame):
     c3, c4 = st.columns(2)
     with c3:
         st.markdown("#### ✅ Chalk **Wins** (favorite wins)")
-        st.table(neon_style(fav_wins.sort_values("Odds").head(topn)[["Name","Parlay #","Bet","Odds","Sport"]],
-                            fmt_map={"Odds": "{:.0f}"}))
+        st.table(neon_style(
+            fav_wins.sort_values("Odds").head(topn)[["Name","Parlay #","Bet","Odds","Sport"]],
+            fmt_map={"Odds": "{:.0f}"}
+        ))
     with c4:
         st.markdown("#### 🎲 Longshot **Misses** (largest +odds losses)")
-        st.table(neon_style(dog_losses.sort_values("Odds", ascending=False).head(topn)[["Name","Parlay #","Bet","Odds","Sport"]],
-                            fmt_map={"Odds": "{:.0f}"}))
+        st.table(neon_style(
+            dog_losses.sort_values("Odds", ascending=False).head(topn)[["Name","Parlay #","Bet","Odds","Sport"]],
+            fmt_map={"Odds": "{:.0f}"}
+        ))
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -613,7 +795,7 @@ with tab_dash:
 with tab_stats:
     render_stat_explorer(bets)
 
-    # ----- Debug / computed (moved inside Stats tab so it doesn't show everywhere) -----
+    # ----- Debug / computed (inside Stats tab only) -----
     with st.expander("🔎 Computed (read-only)"):
         debug = bets[["Name","Parlay #","Bet","Odds","Result","Sport","Takeover","Dagger","Drink Change","Dollars"]].copy()
         debug["Dollars"] = scaled_dollars(debug["Dollars"])
@@ -623,7 +805,158 @@ with tab_stats:
             "Dollars":      "${:,.2f}",
         }))
 
-# ----- Bets -----
+# ----- 🏅 MyCourt Milestones -----
+with tab_miles:
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### Player Win Milestones")
+    milestones_df = compute_win_milestones(bets)
+    if milestones_df.empty:
+        st.info("No milestones hit yet. Keep firing.")
+    else:
+        st.table(neon_style(
+            milestones_df,
+            fmt_map={"Odds": "{:.0f}"}
+        ))
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### Winning Parlays (3+ legs, all win)")
+    parlays_df = compute_parlay_milestones(bets)
+    if parlays_df.empty:
+        st.info("No qualifying winning parlays yet.")
+    else:
+        st.table(neon_style(
+            parlays_df,
+            fmt_map={"Avg Odds": "{:.0f}"}
+        ))
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Weekly best & worst collective weeks
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### Weekly Heat — Best & Worst Collective Weeks")
+    weekly_df = compute_weekly_pnl(bets)
+    if weekly_df.empty:
+        st.info("No weekly P&L yet — place some bets first.")
+    else:
+        # Format week labels as strings
+        weekly_df_disp = weekly_df.copy()
+        weekly_df_disp["Week"] = weekly_df_disp["Week Start"].astype(str) + " → " + weekly_df_disp["Week End"].astype(str)
+        weekly_df_disp = weekly_df_disp[["Week","Total P&L","Total Bets"]]
+
+        best_weeks = weekly_df_disp.sort_values("Total P&L", ascending=False).head(3)
+        worst_weeks = weekly_df_disp.sort_values("Total P&L", ascending=True).head(3)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("#### 🔥 Best Weeks")
+            st.table(neon_style(
+                best_weeks,
+                highlight_col="Total P&L",
+                fmt_map={
+                    "Total P&L": "${:,.2f}",
+                    "Total Bets": "{:.0f}"
+                }
+            ))
+        with c2:
+            st.markdown("#### 🥶 Worst Weeks")
+            st.table(neon_style(
+                worst_weeks,
+                highlight_col="Total P&L",
+                fmt_map={
+                    "Total P&L": "${:,.2f}",
+                    "Total Bets": "{:.0f}"
+                }
+            ))
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ----- 🏛️ HoF & 🚫 Banned -----
+with tab_hof:
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### Hall of Fame & Banned List")
+
+    # 1) Show live lists FIRST
+    st.markdown("#### Hall of Fame")
+    if st.session_state.hof_list:
+        hof_df = pd.DataFrame({"Hall of Fame": st.session_state.hof_list})
+        st.table(neon_style(hof_df))
+    else:
+        st.info("No Hall of Fame entries yet.")
+
+    st.markdown("#### Banned")
+    if st.session_state.banned_list:
+        banned_df = pd.DataFrame({"Banned": st.session_state.banned_list})
+        st.table(neon_style(banned_df))
+    else:
+        st.info("No Banned entries yet.")
+
+    # 2) Then the editing inputs
+    st.markdown("---")
+    st.markdown("#### Edit Lists")
+    st.caption("Editable only in **Edit** mode. One name per line. These lists are saved in your JSON save file.")
+
+    col_h1, col_h2 = st.columns(2)
+    with col_h1:
+        hof_raw = st.text_area(
+            "Hall of Fame (one per line)",
+            value="\n".join(st.session_state.hof_list),
+            height=160,
+            disabled=not edit_mode,
+        )
+    with col_h2:
+        banned_raw = st.text_area(
+            "Banned (one per line)",
+            value="\n".join(st.session_state.banned_list),
+            height=160,
+            disabled=not edit_mode,
+        )
+
+    if edit_mode and st.button("Save HoF & Banned Lists"):
+        st.session_state.hof_list = [x.strip() for x in hof_raw.splitlines() if x.strip()]
+        st.session_state.banned_list = [x.strip() for x in banned_raw.splitlines() if x.strip()]
+        st.success("HoF & Banned updated in session. Download a Save to persist.")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ----- 🍻 Drink Transfers -----
+with tab_court:
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### Vlone Troops — Drink Transfers")
+    st.caption("Transfers bring both people **toward zero**: receiver’s Drink Count goes **down** by the amount, payer’s goes **up** by the amount.")
+
+    standings = summarise(bets, st.session_state.transfers).copy()
+    positive = sorted(list(standings.loc[standings["Drink Count"] > 1, "Name"]))
+    negative = sorted(list(standings.loc[standings["Drink Count"] <= -1, "Name"]))
+
+    col1, col2, col3 = st.columns([1.4,1.4,1])
+    with col1:
+        receiver = st.selectbox("Receiver (positive — will go DOWN)", options=positive if positive else ["—"], index=0)
+    with col2:
+        payer = st.selectbox("Payer (negative — will go UP)", options=negative if negative else ["—"], index=0)
+    with col3:
+        amt = st.number_input("Drinks", min_value=0.5, max_value=50.0, value=1.0, step=0.5)
+
+    valid = edit_mode and positive and negative and receiver != "—" and payer != "—" and receiver != payer
+    if st.button("Record Transfer", disabled=not valid):
+        new = pd.DataFrame([{
+            "From": payer,
+            "To": receiver,
+            "Amount": float(amt),
+            "Created": datetime.now().timestamp()
+        }])
+        st.session_state.transfers = pd.concat([st.session_state.transfers, new], ignore_index=True)
+        st.success(f"Recorded: {payer} → {receiver} ({amt} drinks)")
+        st.rerun()
+
+    st.markdown("#### Transfer Ledger")
+    if st.session_state.transfers.empty:
+        st.info("No transfers yet.")
+    else:
+        ledger = st.session_state.transfers.copy().sort_values("Created", ascending=False)
+        ledger["When"] = ledger["Created"].map(lambda t: datetime.fromtimestamp(t).strftime("%m/%d %I:%M %p"))
+        st.table(neon_style(ledger[["When","From","To","Amount"]], fmt_map={"Amount": "{:.2f}"}))
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ----- 📋 Bets -----
 with tab_bets:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("### Add a Parlay")
@@ -672,43 +1005,4 @@ with tab_bets:
     if edit_mode and st.button("Save changes to working copy"):
         st.session_state.bets = ensure_columns(edited.copy())
         st.success("Saved to session.")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# ----- 🍻 MyCourt -----
-with tab_court:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown("### Vlone Troops — MyCourt")
-    st.caption("Transfers bring both people **toward zero**: receiver’s Drink Count goes **down** by the amount, payer’s goes **up** by the amount.")
-
-    standings = summarise(bets, st.session_state.transfers).copy()
-    positive = sorted(list(standings.loc[standings["Drink Count"] > 1, "Name"]))
-    negative = sorted(list(standings.loc[standings["Drink Count"] <= -1, "Name"]))
-
-    col1, col2, col3 = st.columns([1.4,1.4,1])
-    with col1:
-        receiver = st.selectbox("Receiver (positive — will go DOWN)", options=positive if positive else ["—"], index=0)
-    with col2:
-        payer = st.selectbox("Payer (negative — will go UP)", options=negative if negative else ["—"], index=0)
-    with col3:
-        amt = st.number_input("Drinks", min_value=0.5, max_value=50.0, value=1.0, step=0.5)
-
-    valid = edit_mode and positive and negative and receiver != "—" and payer != "—" and receiver != payer
-    if st.button("Record Transfer", disabled=not valid):
-        new = pd.DataFrame([{
-            "From": payer,
-            "To": receiver,
-            "Amount": float(amt),
-            "Created": datetime.now().timestamp()
-        }])
-        st.session_state.transfers = pd.concat([st.session_state.transfers, new], ignore_index=True)
-        st.success(f"Recorded: {payer} → {receiver} ({amt} drinks)")
-        st.rerun()
-
-    st.markdown("#### Transfer Ledger")
-    if st.session_state.transfers.empty:
-        st.info("No transfers yet.")
-    else:
-        ledger = st.session_state.transfers.copy().sort_values("Created", ascending=False)
-        ledger["When"] = ledger["Created"].map(lambda t: datetime.fromtimestamp(t).strftime("%m/%d %I:%M %p"))
-        st.table(neon_style(ledger[["When","From","To","Amount"]], fmt_map={"Amount": "{:.2f}"}))
     st.markdown("</div>", unsafe_allow_html=True)
