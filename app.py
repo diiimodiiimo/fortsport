@@ -161,33 +161,45 @@ def payout_multiple(odds: float) -> float:
     if odds is None or (isinstance(x := odds, float) and math.isnan(x)): return 0.0
     return odds/100.0 if odds > 0 else 100.0/abs(odds)
 
-# --- DRINKS: symmetric logic ---
-def base_drink_change(odds, result):
+# --- DRINKS: symmetric logic (uses Outcome now) ---
+def base_drink_change(odds, outcome):
     b = payout_multiple(odds)
-    r = (str(result) if result is not None else "").strip().lower()
+    r = (str(outcome) if outcome is not None else "").strip().lower()
     if r == "win":  return +b
     if r == "loss": return -b
     return 0.0
 
 def example_df():
+    # Example now has Outcome as W/L and leaves Result blank for stat text
     df = pd.DataFrame({
         "Name":  ["Jojo","Temp","Etan","Nick","Dimo","Jojo","Temp","Etan","Nick","Dimo","Jojo","Temp","Etan","Nick"],
         "Parlay #":[1,1,1,1,1,2,2,2,2,2,3,3,3,3],
         "Bet":   ["Mahomes 230+ Pass yards","Amon-Ra 70+ rec yards","Gibbs ATD","Travis 4+ Rec","Worthy ATD",
                   "Underwood 200+ pass yards","Iowa ML","Arch 25+ Rush yards","Oregon -6.5","Hosley ATD",
                   "JT ATD","Pickens ATD","DK ATD","Hassan Haskins ATD"],
+        "Player": ["Mahomes","Amon-Ra","Gibbs","Kelce","Worthy",
+                   "Underwood","Iowa","Arch","Oregon","Hosley",
+                   "JT","Pickens","DK","Haskins"],
+        "Bet Type": ["Pass Yds","Rec Yds","TD","Receptions","TD",
+                     "Pass Yds","Moneyline","Rush Yds","Spread","TD",
+                     "TD","TD","TD","TD"],
         "Odds":  [-270,-115,-160,-350,105,117,-185,105,-120,-140,-280,120,180,150],
-        "Result":["Win","Loss","Loss","Win","Win","Win","Win","Win","Loss","Win","Win","Win","Win","Loss"],
+        "Result":["" for _ in range(14)],   # stat outcome text
+        "Outcome":["Win","Loss","Loss","Win","Win","Win","Win","Win","Loss","Win","Win","Win","Win","Loss"],
         "Sport": ["NFL","NFL","NFL","NFL","NFL","CFB","CFB","CFB","CFB","CFB","NFL","NFL","NFL","NFL"],
     })
     df["Created"] = [datetime(2025,1,1,12,0,0).timestamp() + i for i in range(len(df))]
     return df
 
 def ensure_columns(df):
-    req = ["Name","Parlay #","Bet","Odds","Result","Sport","Created"]
+    # New schema includes Player, Bet Type, Result (stat text), Outcome (Win/Loss/Void)
+    req = ["Name","Parlay #","Bet","Player","Bet Type","Odds","Result","Outcome","Sport","Created"]
     for c in req:
         if c not in df.columns:
-            df[c] = (datetime.now().timestamp() if c=="Created" else "")
+            if c == "Created":
+                df[c] = datetime.now().timestamp()
+            else:
+                df[c] = ""
     return df[req]
 
 def compute_daggers(df: pd.DataFrame) -> pd.Series:
@@ -195,8 +207,9 @@ def compute_daggers(df: pd.DataFrame) -> pd.Series:
     for _, g in df.groupby("Parlay #"):
         if len(g) != 5:
             continue
-        losers = g[g["Result"].str.lower() == "loss"]
-        if losers.empty: continue
+        losers = g[g["Outcome"].astype(str).str.lower() == "loss"]
+        if losers.empty:
+            continue
         idx = losers["Odds"].map(implied_prob).idxmax()
         dag.loc[idx] = True
     return dag
@@ -205,7 +218,7 @@ def _parlay_all_miss_discounts(df: pd.DataFrame) -> pd.Series:
     mult = pd.Series(1.0, index=df.index, dtype=float)
     if df.empty: return mult
     for _, g in df.groupby("Parlay #"):
-        res = g["Result"].astype(str).str.lower()
+        res = g["Outcome"].astype(str).str.lower()
         if len(g) > 0 and (res == "loss").all():
             n = len(g)
             factor = max(0.0, 1.0 - 0.10 * n)
@@ -221,26 +234,28 @@ def apply_takeover(df: pd.DataFrame) -> pd.DataFrame:
     for _, g in out.groupby("Name", sort=False):
         streak = 0
         for idx, row in g.iterrows():
+            outcome = row.get("Outcome","")
             takeover = streak >= 3
             out.at[idx,"Takeover"] = takeover
 
-            val = base_drink_change(row["Odds"], row["Result"])
+            val = base_drink_change(row["Odds"], outcome)
 
-            if takeover and str(row["Result"]).lower() == "win":
+            outcome_lower = str(outcome).lower()
+            if takeover and outcome_lower == "win":
                 val *= 2.0
-            if str(row["Result"]).lower() == "loss":
+            if outcome_lower == "loss":
                 val *= discount.get(idx, 1.0)
 
             out.at[idx,"Drink Change"] = val
 
-            if str(row["Result"]).lower() == "win":
+            if outcome_lower == "win":
                 streak += 1
-            elif str(row["Result"]).lower() == "loss":
+            elif outcome_lower == "loss":
                 streak = 0
     return out.sort_index()
 
-def dollars_pnl_100(odds: float, result: str) -> float:
-    r = (str(result) if result is not None else "").strip().lower()
+def dollars_pnl_100(odds: float, outcome: str) -> float:
+    r = (str(outcome) if outcome is not None else "").strip().lower()
     if r not in {"win", "loss"} or odds is None or (isinstance(odds, float) and math.isnan(odds)):
         return 0.0
     if r == "loss":
@@ -250,13 +265,30 @@ def dollars_pnl_100(odds: float, result: str) -> float:
     return BASE_STAKE * (100.0 / abs(odds))
 
 def compute_all(bets_raw: pd.DataFrame):
-    df = bets_raw.copy()
-    df["Odds"] = df["Odds"].map(clean_odds)
-    df["Result"] = df["Result"].fillna("").astype(str).str.title()
+    # Make sure all required columns exist
+    df = ensure_columns(bets_raw.copy())
 
+    # Clean odds
+    df["Odds"] = df["Odds"].map(clean_odds)
+
+    # Normalize string columns
+    df["Outcome"] = df.get("Outcome","").fillna("").astype(str)
+    df["Result"] = df.get("Result","").fillna("").astype(str)
+
+    # ----- Legacy migration -----
+    # If Outcome is blank but Result looks like Win/Loss/Void, copy it into Outcome.
+    lower_res = df["Result"].str.strip().str.lower()
+    legacy_mask = df["Outcome"].str.strip().eq("")
+    looks_like_outcome = lower_res.isin(["win","loss","void"])
+    df.loc[legacy_mask & looks_like_outcome, "Outcome"] = df.loc[legacy_mask & looks_like_outcome, "Result"].str.title()
+
+    # Standardize Outcome casing for comparisons
+    df["Outcome"] = df["Outcome"].fillna("").astype(str).str.title()
+
+    # Drinks / takeover / dagger / dollars all use Outcome
     df = apply_takeover(df)
     df["Dagger"] = compute_daggers(df)
-    df["Dollars"] = [dollars_pnl_100(o, r) for o, r in zip(df["Odds"], df["Result"])]
+    df["Dollars"] = [dollars_pnl_100(o, r) for o, r in zip(df["Odds"], df["Outcome"])]
     return df
 
 def _badge_str(wins: int) -> str:
@@ -271,10 +303,10 @@ def summarise(df: pd.DataFrame, transfers: pd.DataFrame) -> pd.DataFrame:
         ])
     else:
         tmp = df.copy()
-        tmp["win"]  = (tmp["Result"].str.lower()=="win").astype(int)
-        tmp["loss"] = (tmp["Result"].str.lower()=="loss").astype(int)
+        tmp["win"]  = (tmp["Outcome"].astype(str).str.lower()=="win").astype(int)
+        tmp["loss"] = (tmp["Outcome"].astype(str).str.lower()=="loss").astype(int)
 
-        size = tmp.groupby("Parlay #")["Result"].count()
+        size = tmp.groupby("Parlay #")["Outcome"].count()
         all_win = tmp.groupby("Parlay #")["win"].apply(lambda s: (s == 1).all())
         parlay_win = ((size >= 3) & all_win)
         tmp = tmp.merge(parlay_win.rename("ParlayWon"), on="Parlay #", how="left").fillna({"ParlayWon":False})
@@ -283,7 +315,7 @@ def summarise(df: pd.DataFrame, transfers: pd.DataFrame) -> pd.DataFrame:
         streaks = []
         for name, g in tmp.sort_values("Created").groupby("Name"):
             s = 0
-            for r in g["Result"].astype(str).str.lower():
+            for r in g["Outcome"].astype(str).str.lower():
                 if r == "win": s = (s+1) if s >= 0 else 1
                 elif r == "loss": s = (s-1) if s <= 0 else -1
             if s > 0: tag = f"W{s}"
@@ -340,8 +372,8 @@ def summarise(df: pd.DataFrame, transfers: pd.DataFrame) -> pd.DataFrame:
 
 def total_parlays_won(df: pd.DataFrame) -> int:
     if df.empty: return 0
-    size = df.groupby("Parlay #")["Result"].count()
-    all_win = df.groupby("Parlay #")["Result"].apply(lambda s: (s.str.lower()=="win").all())
+    size = df.groupby("Parlay #")["Outcome"].count()
+    all_win = df.groupby("Parlay #")["Outcome"].apply(lambda s: (s.astype(str).str.lower()=="win").all())
     return int(((size >= 3) & all_win).sum())
 
 # ---------------- Milestones helpers ----------------
@@ -349,7 +381,7 @@ def compute_win_milestones(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["Name","Milestone","When","Bet","Parlay #","Sport","Odds"])
 
-    wins = df[df["Result"].str.lower() == "win"].copy()
+    wins = df[df["Outcome"].astype(str).str.lower() == "win"].copy()
     if wins.empty:
         return pd.DataFrame(columns=["Name","Milestone","When","Bet","Parlay #","Sport","Odds"])
 
@@ -387,8 +419,8 @@ def compute_parlay_milestones(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=["Parlay #","Player(s)","Legs","Hit On","Headline Bet","Avg Odds"])
 
     tmp = df.copy()
-    tmp["win"] = (tmp["Result"].str.lower() == "win").astype(int)
-    size = tmp.groupby("Parlay #")["Result"].count()
+    tmp["win"] = (tmp["Outcome"].astype(str).str.lower() == "win").astype(int)
+    size = tmp.groupby("Parlay #")["Outcome"].count()
     all_win = tmp.groupby("Parlay #")["win"].apply(lambda s: (s == 1).all())
     winning_ids = size[(size >= 3) & all_win].index
 
@@ -640,14 +672,14 @@ def render_stat_explorer(bets: pd.DataFrame):
     if who != "All":
         filt = filt[filt["Name"] == who]
 
-    # 3) Performance by Sport
+    # 3) Performance by Sport (per bettor)
     st.markdown("### 📊 Performance by Sport")
     if not filt.empty:
         sport_stats = []
         for name in sorted(filt["Name"].dropna().unique()):
             person_bets = filt[filt["Name"] == name]
-            wins = (person_bets["Result"].str.lower() == "win").sum()
-            losses = (person_bets["Result"].str.lower() == "loss").sum()
+            wins = (person_bets["Outcome"].astype(str).str.lower() == "win").sum()
+            losses = (person_bets["Outcome"].astype(str).str.lower() == "loss").sum()
             total = len(person_bets)
             win_pct = (wins / total * 100) if total > 0 else 0.0
             avg_odds = pd.to_numeric(person_bets["Odds"], errors="coerce").mean()
@@ -677,25 +709,29 @@ def render_stat_explorer(bets: pd.DataFrame):
     else:
         st.info("No bets found for this filter.")
 
-    # 4) Worst / Best Beats
-    losers = filt[filt["Result"].str.lower() == "loss"].copy()
+    # 4) Worst / Best Beats (no player / bet type columns)
+    losers = filt[filt["Outcome"].astype(str).str.lower() == "loss"].copy()
     losers["_prob"] = losers["Odds"].map(implied_prob)
-    # WORST BEATS: highest implied probability losses (e.g. -200 losing)
-    worst = losers.sort_values("_prob", ascending=False).head(topn)[["Name","Parlay #","Bet","Odds","Result","Sport"]]
+    worst = losers.sort_values("_prob", ascending=False).head(topn)[
+        ["Name","Parlay #","Bet","Odds","Outcome","Result","Sport"]
+    ]
 
-    winners = filt[filt["Result"].str.lower() == "win"].copy()
+    winners = filt[filt["Outcome"].astype(str).str.lower() == "win"].copy()
     winners["_prob"] = winners["Odds"].map(implied_prob)
-    # BEST BEATS: lowest implied probability wins (biggest upsets)
-    best = winners.sort_values("_prob", ascending=True).head(topn)[["Name","Parlay #","Bet","Odds","Result","Sport"]]
+    best = winners.sort_values("_prob", ascending=True).head(topn)[
+        ["Name","Parlay #","Bet","Odds","Outcome","Result","Sport"]
+    ]
 
     st.markdown("#### 🟥 Worst Beats (highest-probability losses)")
     wb = worst.copy()
-    if not wb.empty: wb["Odds"] = pd.to_numeric(wb["Odds"], errors="coerce")
+    if not wb.empty:
+        wb["Odds"] = pd.to_numeric(wb["Odds"], errors="coerce")
     st.table(neon_style(wb, fmt_map={"Odds": "{:.0f}"}))
 
     st.markdown("#### 🟩 Best Beats (biggest upset wins)")
     bb = best.copy()
-    if not bb.empty: bb["Odds"] = pd.to_numeric(bb["Odds"], errors="coerce")
+    if not bb.empty:
+        bb["Odds"] = pd.to_numeric(bb["Odds"], errors="coerce")
     st.table(neon_style(bb, fmt_map={"Odds": "{:.0f}"}))
 
     # 5) Filtered History
@@ -703,7 +739,7 @@ def render_stat_explorer(bets: pd.DataFrame):
     hist = filt.copy().sort_values("Created", ascending=False)
     if not hist.empty:
         hist["When"] = hist["Created"].map(lambda t: datetime.fromtimestamp(t).strftime("%m/%d %I:%M %p"))
-        view_cols = [c for c in ["When","Name","Parlay #","Bet","Odds","Result","Sport"] if c in hist.columns]
+        view_cols = [c for c in ["When","Name","Parlay #","Bet","Player","Bet Type","Result","Outcome","Odds","Sport"] if c in hist.columns]
         if "Odds" in hist.columns:
             hist["Odds"] = pd.to_numeric(hist["Odds"], errors="coerce")
         st.table(neon_style(hist[view_cols], fmt_map={"Odds": "{:.0f}"}))
@@ -712,10 +748,10 @@ def render_stat_explorer(bets: pd.DataFrame):
 
     # 6) Spotlight — Wins & Losses
     st.markdown("### Spotlight — Wins & Losses")
-    fav_wins   = filt[(filt["Result"].str.lower()=="win")  & (pd.to_numeric(filt["Odds"], errors="coerce") < 0)].copy()
-    dog_wins   = filt[(filt["Result"].str.lower()=="win")  & (pd.to_numeric(filt["Odds"], errors="coerce") > 0)].copy()
-    fav_losses = filt[(filt["Result"].str.lower()=="loss") & (pd.to_numeric(filt["Odds"], errors="coerce") < 0)].copy()
-    dog_losses = filt[(filt["Result"].str.lower()=="loss") & (pd.to_numeric(filt["Odds"], errors="coerce") > 0)].copy()
+    fav_wins   = filt[(filt["Outcome"].astype(str).str.lower()=="win")  & (pd.to_numeric(filt["Odds"], errors="coerce") < 0)].copy()
+    dog_wins   = filt[(filt["Outcome"].astype(str).str.lower()=="win")  & (pd.to_numeric(filt["Odds"], errors="coerce") > 0)].copy()
+    fav_losses = filt[(filt["Outcome"].astype(str).str.lower()=="loss") & (pd.to_numeric(filt["Odds"], errors="coerce") < 0)].copy()
+    dog_losses = filt[(filt["Outcome"].astype(str).str.lower()=="loss") & (pd.to_numeric(filt["Odds"], errors="coerce") > 0)].copy()
 
     for df_ in (fav_wins, dog_wins, fav_losses, dog_losses):
         if not df_.empty:
@@ -734,6 +770,99 @@ def render_stat_explorer(bets: pd.DataFrame):
             dog_losses.sort_values("Odds", ascending=False).head(topn)[["Name","Parlay #","Bet","Odds","Sport"]],
             fmt_map={"Odds": "{:.0f}"}
         ))
+
+    # 7) Breakdown by Player & Bet Type
+    st.markdown("### Breakdown by Player & Bet Type")
+
+    bp_col, bt_col = st.columns(2)
+
+    # --- Player breakdown (actual athletes) ---
+    with bp_col:
+        st.markdown("#### 🧍 Player Breakdown")
+        player_df = filt.copy()
+        player_df["Player"] = player_df["Player"].fillna("").astype(str).str.strip()
+        player_df = player_df[player_df["Player"] != ""]
+        if player_df.empty:
+            st.info("No Player info yet — start filling in the Player column on bets.")
+        else:
+            player_df["is_win"] = (player_df["Outcome"].astype(str).str.lower() == "win").astype(int)
+            player_df["is_loss"] = (player_df["Outcome"].astype(str).str.lower() == "loss").astype(int)
+
+            agg_p = (player_df.groupby("Player", as_index=False)
+                     .agg(
+                         Total_Bets=("Outcome", "size"),
+                         Wins=("is_win", "sum"),
+                         Losses=("is_loss", "sum"),
+                         Avg_Odds=("Odds", lambda s: float(np.nanmean(s)) if len(s) else np.nan),
+                         Drinks=("Drink Change", "sum"),
+                         Dollars=("Dollars", "sum"),
+                     ))
+            agg_p["Win %"] = np.where(
+                agg_p["Total_Bets"] > 0,
+                agg_p["Wins"] / agg_p["Total_Bets"] * 100,
+                0.0,
+            )
+            agg_p["Dollars"] = scaled_dollars(agg_p["Dollars"])
+            agg_p = agg_p[["Player","Total_Bets","Wins","Losses","Win %","Avg_Odds","Drinks","Dollars"]]
+            agg_p = agg_p.sort_values("Win %", ascending=False)
+
+            st.table(neon_style(
+                agg_p,
+                highlight_col="Win %",
+                fmt_map={
+                    "Total_Bets": "{:.0f}",
+                    "Wins": "{:.0f}",
+                    "Losses": "{:.0f}",
+                    "Win %": "{:.1f}%",
+                    "Avg_Odds": "{:.0f}",
+                    "Drinks": "{:.2f}",
+                    "Dollars": "${:,.2f}",
+                }
+            ))
+
+    # --- Bet Type breakdown (TD, pass yds, ML, etc.) ---
+    with bt_col:
+        st.markdown("#### 🎯 Bet Type Breakdown")
+        bt_df = filt.copy()
+        bt_df["Bet Type"] = bt_df["Bet Type"].fillna("").astype(str).str.strip()
+        bt_df = bt_df[bt_df["Bet Type"] != ""]
+        if bt_df.empty:
+            st.info("No Bet Type info yet — start filling in the Bet Type column on bets.")
+        else:
+            bt_df["is_win"] = (bt_df["Outcome"].astype(str).str.lower() == "win").astype(int)
+            bt_df["is_loss"] = (bt_df["Outcome"].astype(str).str.lower() == "loss").astype(int)
+
+            agg_t = (bt_df.groupby("Bet Type", as_index=False)
+                     .agg(
+                         Total_Bets=("Outcome", "size"),
+                         Wins=("is_win", "sum"),
+                         Losses=("is_loss", "sum"),
+                         Avg_Odds=("Odds", lambda s: float(np.nanmean(s)) if len(s) else np.nan),
+                         Drinks=("Drink Change", "sum"),
+                         Dollars=("Dollars", "sum"),
+                     ))
+            agg_t["Win %"] = np.where(
+                agg_t["Total_Bets"] > 0,
+                agg_t["Wins"] / agg_t["Total_Bets"] * 100,
+                0.0,
+            )
+            agg_t["Dollars"] = scaled_dollars(agg_t["Dollars"])
+            agg_t = agg_t[["Bet Type","Total_Bets","Wins","Losses","Win %","Avg_Odds","Drinks","Dollars"]]
+            agg_t = agg_t.sort_values("Win %", ascending=False)
+
+            st.table(neon_style(
+                agg_t,
+                highlight_col="Win %",
+                fmt_map={
+                    "Total_Bets": "{:.0f}",
+                    "Wins": "{:.0f}",
+                    "Losses": "{:.0f}",
+                    "Win %": "{:.1f}%",
+                    "Avg_Odds": "{:.0f}",
+                    "Drinks": "{:.2f}",
+                    "Dollars": "${:,.2f}",
+                }
+            ))
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -797,8 +926,14 @@ with tab_stats:
 
     # ----- Debug / computed (inside Stats tab only) -----
     with st.expander("🔎 Computed (read-only)"):
-        debug = bets[["Name","Parlay #","Bet","Odds","Result","Sport","Takeover","Dagger","Drink Change","Dollars"]].copy()
-        debug["Dollars"] = scaled_dollars(debug["Dollars"])
+
+        debug_cols = ["Name","Parlay #","Bet","Player","Bet Type","Odds","Result","Outcome","Sport",
+                      "Takeover","Dagger","Drink Change","Dollars"]
+        debug_cols = [c for c in debug_cols if c in bets.columns]
+
+        debug = bets[debug_cols].copy()
+        if "Dollars" in debug.columns:
+            debug["Dollars"] = scaled_dollars(debug["Dollars"])
         st.table(neon_style(debug, fmt_map={
             "Odds":         "{:.0f}",
             "Drink Change": "{:.5f}",
@@ -972,15 +1107,18 @@ with tab_bets:
         "Name": ["" for _ in range(num_rows)],
         "Parlay #": [parlay_no for _ in range(num_rows)],
         "Bet": ["" for _ in range(num_rows)],
+        "Player": ["" for _ in range(num_rows)],
+        "Bet Type": ["" for _ in range(num_rows)],
         "Odds": ["" for _ in range(num_rows)],
-        "Result": ["Win" for _ in range(num_rows)],
+        "Result": ["" for _ in range(num_rows)],      # stat outcome text
+        "Outcome": ["Win" for _ in range(num_rows)],  # W/L/Void
         "Sport": ["" for _ in range(num_rows)],
     })
     new_rows = st.data_editor(
         tmpl, key="new_parlay_editor", use_container_width=True, hide_index=True,
         num_rows="dynamic",
         column_config={
-            "Result": st.column_config.SelectboxColumn("Result", options=["Win","Loss","Void"]),
+            "Outcome": st.column_config.SelectboxColumn("Outcome", options=["Win","Loss","Void"]),
         }
     )
     st.write("")
@@ -999,7 +1137,7 @@ with tab_bets:
         st.session_state.bets, key="bets_table_editor", use_container_width=True, hide_index=True,
         disabled=not edit_mode,
         column_config={
-            "Result": st.column_config.SelectboxColumn("Result", options=["Win","Loss","Void"]),
+            "Outcome": st.column_config.SelectboxColumn("Outcome", options=["Win","Loss","Void"]),
         }
     )
     if edit_mode and st.button("Save changes to working copy"):
