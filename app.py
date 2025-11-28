@@ -14,6 +14,9 @@ SEED_FILE = "seed.json"
 AUTOSAVE_FILE = "fortsport_autosave.json"
 BASE_STAKE = 100.0  # baseline logic assumes $100 per bet; we scale from this
 MILESTONES = [10, 25, 50, 100]
+LOSS_BASE = 1.0   # every loss is at least -1 drink
+LOSS_K    = .2   # how much to scale with implied probability
+
 
 # ---------------- Global theme (BLACK + NEON) ----------------
 NEON_CSS = """
@@ -161,12 +164,37 @@ def payout_multiple(odds: float) -> float:
     if odds is None or (isinstance(x := odds, float) and math.isnan(x)): return 0.0
     return odds/100.0 if odds > 0 else 100.0/abs(odds)
 
+def loss_multiple_soft(odds: float, base: float = LOSS_BASE, k: float = LOSS_K) -> float:
+    """
+    Loss penalty:
+      loss_multiple = base + k * implied_prob
+    So every loss is at least -base, and chalk (high implied_prob) hurts more.
+    """
+    if odds is None or (isinstance(odds, float) and math.isnan(odds)):
+        return base
+    p = implied_prob(odds)
+    return base + k * p
+
+
+
 # --- DRINKS: symmetric logic (uses Outcome now) ---
 def base_drink_change(odds, outcome):
-    b = payout_multiple(odds)
+    """
+    Drinks logic:
+      - Win: +payout_multiple(odds)  (unchanged)
+      - Loss: -(LOSS_BASE + LOSS_K * implied_prob)
+      - Anything else (Void / empty): 0
+    """
     r = (str(outcome) if outcome is not None else "").strip().lower()
-    if r == "win":  return +b
-    if r == "loss": return -b
+
+    if r == "win":
+        return payout_multiple(odds)
+
+    if r == "loss":
+        loss_mult = loss_multiple_soft(odds)
+        return -loss_mult
+
+    # Void / blank
     return 0.0
 
 def example_df():
