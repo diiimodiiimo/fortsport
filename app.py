@@ -295,7 +295,7 @@ def _badge_str(wins: int) -> str:
     got = [f"{m}W" for m in MILESTONES if wins >= m]
     return ", ".join(got) if got else ""
 
-def summarise(df: pd.DataFrame, transfers: pd.DataFrame) -> pd.DataFrame:
+def summarise(df: pd.DataFrame, transfers: pd.DataFrame, fantasy: pd.DataFrame | None = None) -> pd.DataFrame:
     if df.empty:
         base = pd.DataFrame(columns=[
             "Name","Drink Count","Record","Active Streak","Cumulative Odds","Parlays Won","Dollars Won",
@@ -356,14 +356,26 @@ def summarise(df: pd.DataFrame, transfers: pd.DataFrame) -> pd.DataFrame:
     base["Drinks Paid Out"] = base["Drinks Paid Out"].fillna(0.0)
     base["Drinks Received"] = base["Drinks Received"].fillna(0.0)
 
+    # Fantasy assignments (single-user +/- adjustments)
+    if fantasy is not None and not fantasy.empty:
+        f = fantasy.copy()
+        f["Name"] = f["Name"].astype(str)
+        f["Delta"] = pd.to_numeric(f["Delta"], errors="coerce").fillna(0.0)
+        adj = f.groupby("Name")["Delta"].sum().rename("Fantasy Delta")
+        base = base.merge(adj, left_on="Name", right_index=True, how="left")
+        base["Fantasy Delta"] = base["Fantasy Delta"].fillna(0.0)
+    else:
+        base["Fantasy Delta"] = 0.0
+
     base["Drink Count"] = (
         base.get("Drink_Sum", 0.0)
         - base.get("Daggers", 0.0)
         + base["Drinks Paid Out"]
         - base["Drinks Received"]
+        + base["Fantasy Delta"]
     )
 
-    # Reorder so Badges is last
+    # Reorder so Badges is last (and hide Fantasy Delta from output)
     final = base[[
         "Name","Drink Count","Record","Active Streak","Cumulative Odds","Parlays Won","Dollars Won",
         "Drinks Paid Out","Drinks Received","Badges"
@@ -497,37 +509,63 @@ def compute_weekly_pnl(df: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------- Bundle save/load ----------------
 def pack_state():
+    # ensure fantasy_assignments exists
+    if "fantasy_assignments" not in st.session_state:
+        st.session_state.fantasy_assignments = pd.DataFrame(
+            columns=["Name","Delta","Reason","Created"]
+        )
     return {
         "bets": ensure_columns(st.session_state.bets.copy()),
         "transfers": st.session_state.transfers.copy(),
+        "fantasy": st.session_state.fantasy_assignments.copy(),
         "hof": st.session_state.get("hof_list", []),
         "banned": st.session_state.get("banned_list", []),
     }
 
 def unpack_state(obj):
-    # Always return (bets, transfers, hof, banned)
+    """
+    Always return (bets, transfers, hof, banned, fantasy_df)
+    """
+    empty_fantasy = pd.DataFrame(columns=["Name","Delta","Reason","Created"])
+
     if isinstance(obj, list):
         bets = ensure_columns(pd.DataFrame(obj))
         transfers = pd.DataFrame(columns=["From","To","Amount","Created"])
-        return bets, transfers, [], []
+        return bets, transfers, [], [], empty_fantasy
+
     if isinstance(obj, dict):
         bets_src = obj.get("bets", obj)
         bets = ensure_columns(pd.DataFrame(bets_src))
+
         transfers = pd.DataFrame(obj.get("transfers", []))
         if transfers.empty:
             transfers = pd.DataFrame(columns=["From","To","Amount","Created"])
+
         hof = obj.get("hof", [])
         banned = obj.get("banned", [])
-        return bets, transfers, hof, banned
+
+        fantasy_raw = obj.get("fantasy", [])
+        fantasy = pd.DataFrame(fantasy_raw)
+        if fantasy.empty:
+            fantasy = empty_fantasy
+        else:
+            for c in ["Name","Delta","Reason","Created"]:
+                if c not in fantasy.columns:
+                    fantasy[c] = "" if c in ["Name","Reason"] else 0.0
+            fantasy = fantasy[["Name","Delta","Reason","Created"]]
+
+        return bets, transfers, hof, banned, fantasy
+
     bets = ensure_columns(pd.DataFrame(obj))
     transfers = pd.DataFrame(columns=["From","To","Amount","Created"])
-    return bets, transfers, [], []
+    return bets, transfers, [], [], empty_fantasy
 
 def dump_json_bundle() -> str:
     bundle = pack_state()
     return json.dumps({
         "bets": json.loads(bundle["bets"].to_json(orient="records")),
         "transfers": json.loads(bundle["transfers"].to_json(orient="records")),
+        "fantasy": json.loads(bundle["fantasy"].to_json(orient="records")),
         "hof": bundle.get("hof", []),
         "banned": bundle.get("banned", []),
     })
@@ -543,18 +581,21 @@ def load_seed_bundle():
     # default fallback
     bets = ensure_columns(example_df())
     transfers = pd.DataFrame(columns=["From","To","Amount","Created"])
-    return bets, transfers, [], []
+    fantasy = pd.DataFrame(columns=["Name","Delta","Reason","Created"])
+    return bets, transfers, [], [], fantasy
 
 def save_seed_bundle():
     bundle = pack_state()
     bets_df = ensure_columns(bundle["bets"].copy())
     transfers_df = bundle["transfers"].copy()
+    fantasy_df = bundle["fantasy"].copy()
     hof = bundle.get("hof", [])
     banned = bundle.get("banned", [])
     with open(SEED_FILE, "w", encoding="utf-8") as f:
         f.write(json.dumps({
             "bets": json.loads(bets_df.to_json(orient="records")),
             "transfers": json.loads(transfers_df.to_json(orient="records")),
+            "fantasy": json.loads(fantasy_df.to_json(orient="records")),
             "hof": hof,
             "banned": banned,
         }))
@@ -564,21 +605,28 @@ if "bets" not in st.session_state or "transfers" not in st.session_state:
     if os.path.exists(AUTOSAVE_FILE):
         try:
             obj = json.loads(open(AUTOSAVE_FILE, "r", encoding="utf-8").read())
-            bets, transfers, hof, banned = unpack_state(obj)
+            bets, transfers, hof, banned, fantasy = unpack_state(obj)
         except Exception:
-            bets, transfers, hof, banned = load_seed_bundle()
+            bets, transfers, hof, banned, fantasy = load_seed_bundle()
     else:
-        bets, transfers, hof, banned = load_seed_bundle()
+        bets, transfers, hof, banned, fantasy = load_seed_bundle()
     st.session_state.bets = bets
     st.session_state.transfers = transfers
     st.session_state.hof_list = hof
     st.session_state.banned_list = banned
+    st.session_state.fantasy_assignments = fantasy
 
 # Ensure HoF/Banned exist even if set later
 if "hof_list" not in st.session_state:
     st.session_state.hof_list = []
 if "banned_list" not in st.session_state:
     st.session_state.banned_list = []
+
+# Ensure fantasy_assignments exists
+if "fantasy_assignments" not in st.session_state:
+    st.session_state.fantasy_assignments = pd.DataFrame(
+        columns=["Name","Delta","Reason","Created"]
+    )
 
 if "stake_confirmed" not in st.session_state:
     st.session_state.stake_confirmed = BASE_STAKE  # default $100
@@ -601,11 +649,12 @@ up = st.sidebar.file_uploader("Upload Save (.json)", type=["json"])
 if up and edit_mode:
     try:
         obj = json.loads(up.read().decode("utf-8"))
-        bets, transfers, hof, banned = unpack_state(obj)
+        bets, transfers, hof, banned, fantasy = unpack_state(obj)
         st.session_state.bets = bets
         st.session_state.transfers = transfers
         st.session_state.hof_list = hof
         st.session_state.banned_list = banned
+        st.session_state.fantasy_assignments = fantasy
         st.success("Save loaded into working copy.")
     except Exception as e:
         st.error(f"Could not read file: {e}")
@@ -903,7 +952,7 @@ with tab_dash:
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("### Squad Leaderboard")
-    summary = summarise(bets, st.session_state.transfers).copy()
+    summary = summarise(bets, st.session_state.transfers, st.session_state.fantasy_assignments).copy()
     if "Dollars Won" in summary.columns:
         summary["Dollars Won"] = scaled_dollars(summary["Dollars Won"])
     st.table(neon_style(
@@ -1058,7 +1107,7 @@ with tab_court:
     st.markdown("### Vlone Troops — Drink Transfers")
     st.caption("Transfers bring both people **toward zero**: receiver’s Drink Count goes **down** by the amount, payer’s goes **up** by the amount.")
 
-    standings = summarise(bets, st.session_state.transfers).copy()
+    standings = summarise(bets, st.session_state.transfers, st.session_state.fantasy_assignments).copy()
     positive = sorted(list(standings.loc[standings["Drink Count"] > 1, "Name"]))
     negative = sorted(list(standings.loc[standings["Drink Count"] <= -1, "Name"]))
 
@@ -1089,6 +1138,55 @@ with tab_court:
         ledger = st.session_state.transfers.copy().sort_values("Created", ascending=False)
         ledger["When"] = ledger["Created"].map(lambda t: datetime.fromtimestamp(t).strftime("%m/%d %I:%M %p"))
         st.table(neon_style(ledger[["When","From","To","Amount"]], fmt_map={"Amount": "{:.2f}"}))
+
+    # ---- Fantasy Assignments (single-user +/-) ----
+    st.markdown("### 🧠 Fantasy Assignments")
+    st.caption("Use this to add or subtract drinks for **one** player (e.g. weekly fantasy punishments).")
+
+    names_for_fantasy = sorted(list(standings["Name"])) if not standings.empty else []
+    colf1, colf2, colf3 = st.columns([1.4, 1.4, 1.2])
+    with colf1:
+        fant_name = st.selectbox("Player", options=names_for_fantasy if names_for_fantasy else ["—"], index=0)
+    with colf2:
+        fant_mode = st.radio(
+            "Direction",
+            options=["Add drink", "Subtract drink"],
+            horizontal=False,
+        )
+    with colf3:
+        fant_amt = st.number_input("Drinks (fantasy)", min_value=0.5, max_value=50.0, value=1.0, step=0.5)
+
+    fant_reason = st.text_input("Reason (optional)", value="", placeholder="e.g. Lost fantasy matchup, weekly punishment")
+
+    fant_valid = edit_mode and names_for_fantasy and fant_name != "—"
+
+    if st.button("Record Fantasy Assignment", disabled=not fant_valid):
+        delta = float(fant_amt) if "Add" in fant_mode else -float(fant_amt)
+        new_fant = pd.DataFrame([{
+            "Name": fant_name,
+            "Delta": delta,
+            "Reason": fant_reason,
+            "Created": datetime.now().timestamp()
+        }])
+        st.session_state.fantasy_assignments = pd.concat(
+            [st.session_state.fantasy_assignments, new_fant],
+            ignore_index=True
+        )
+        st.success(f"Fantasy assignment recorded for {fant_name}: {delta:+.2f} drinks")
+        st.rerun()
+
+    st.markdown("#### Fantasy Assignment Ledger")
+    if st.session_state.fantasy_assignments.empty:
+        st.info("No fantasy assignments yet.")
+    else:
+        f_ledger = st.session_state.fantasy_assignments.copy().sort_values("Created", ascending=False)
+        f_ledger["When"] = f_ledger["Created"].map(lambda t: datetime.fromtimestamp(t).strftime("%m/%d %I:%M %p"))
+        f_ledger["Delta"] = pd.to_numeric(f_ledger["Delta"], errors="coerce")
+        st.table(neon_style(
+            f_ledger[["When","Name","Delta","Reason"]],
+            fmt_map={"Delta": "{:+.2f}"}
+        ))
+
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ----- 📋 Bets -----
